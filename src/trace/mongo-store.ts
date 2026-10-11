@@ -8,7 +8,6 @@ import {
   type MongoClientOptions,
 } from "mongodb";
 import type { TraceConfig } from "../config";
-import { createLogger } from "../logger";
 import { errorMessage } from "../utils/errors";
 import { maskUserinfo } from "../utils/url";
 import {
@@ -22,8 +21,6 @@ import {
 } from "./record";
 import type { DeliveryUpdate, TraceStore } from "./writer";
 
-const log = createLogger("trace");
-
 export const TRACE_COLLECTION = "ocpp_traces";
 
 /**
@@ -34,8 +31,6 @@ const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024 - 64 * 1024;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_KEY = 11000;
-/** Between two attempts at creating the indexes, when MongoDB is unavailable. */
-const INDEX_RETRY_MS = 30_000;
 
 /**
  * - `expiresAt`: native TTL, MongoDB deletes expired traces in the background
@@ -166,7 +161,6 @@ function masked(err: unknown): Error {
 export class MongoTraceStore implements TraceStore {
   private readonly collection: Collection<MongoTraceDocument>;
   private indexesReady = false;
-  private lastIndexAttempt = Number.NEGATIVE_INFINITY;
 
   static create(
     config: Pick<TraceConfig, "mongodbUri" | "database" | "retentionDays">,
@@ -206,7 +200,9 @@ export class MongoTraceStore implements TraceStore {
   }
 
   async insertMany(docs: TraceDocument[]): Promise<{ rejected: { id: string; reason: string }[] }> {
-    await this.ensureIndexesOnce();
+    // Never store a trace that would not expire: until the indexes (TTL
+    // included) exist, every batch fails, so the writer retries then drops it.
+    if (!this.indexesReady) await this.ensureIndexes();
 
     const rejected: { id: string; reason: string }[] = [];
     const mongoDocs: MongoTraceDocument[] = [];
@@ -263,17 +259,6 @@ export class MongoTraceStore implements TraceStore {
       await this.client.close();
     } catch (err) {
       throw masked(err);
-    }
-  }
-
-  /** Indexes are created before the first write, retried while they fail; never blocking writes. */
-  private async ensureIndexesOnce(): Promise<void> {
-    if (this.indexesReady || Date.now() - this.lastIndexAttempt < INDEX_RETRY_MS) return;
-    this.lastIndexAttempt = Date.now();
-    try {
-      await this.ensureIndexes();
-    } catch (err) {
-      log.error("trace index creation failed", { error: errorMessage(err) });
     }
   }
 }

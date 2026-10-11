@@ -164,6 +164,28 @@ describe.skipIf(!MONGODB_URI)("MongoTraceStore against MongoDB", { timeout: 30_0
     await client?.close();
   });
 
+  it("never writes traces while the TTL index cannot be created", async () => {
+    // An index named like the TTL one but without expiry: createIndexes fails,
+    // as it does for a user allowed to insert but not to create indexes.
+    const other = `${database}_no_ttl`;
+    await client
+      .db(other)
+      .collection(TRACE_COLLECTION)
+      .createIndex({ expiresAt: 1 }, { name: "expiresAt_ttl" });
+    const blocked = MongoTraceStore.create({
+      mongodbUri: MONGODB_URI!,
+      database: other,
+      retentionDays: 7,
+    });
+    try {
+      await expect(blocked.insertMany(traceDocs(["charger", BOOT]))).rejects.toThrow();
+      expect(await client.db(other).collection(TRACE_COLLECTION).countDocuments()).toBe(0);
+    } finally {
+      await blocked.close();
+      await client.db(other).dropDatabase();
+    }
+  });
+
   it("creates the TTL index and the query indexes", async () => {
     const indexes = await collection().indexes();
     const byName = Object.fromEntries(indexes.map((index) => [index.name, index]));
