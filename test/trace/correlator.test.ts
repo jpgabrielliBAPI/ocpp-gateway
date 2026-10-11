@@ -72,4 +72,21 @@ describe("Correlator", () => {
       expect(c.answer("csms-a", "csms-to-cp", `m${i}`)).toEqual(call(`t${i}`));
     }
   });
+
+  it("bounds the memory held by unanswered CALLs, not only their number", () => {
+    const c = new Correlator(1000, 100);
+    c.call("csms-a", "cp-to-csms", "small", call("t1"));
+    c.call("csms-a", "cp-to-csms", "x".repeat(200), call("t2"));
+    // An oversized CALL is never kept, and does not evict the others.
+    expect(c.answer("csms-a", "csms-to-cp", "x".repeat(200))).toBeUndefined();
+    expect(c.answer("csms-a", "csms-to-cp", "small")).toEqual(call("t1"));
+  });
+
+  it("evicts the oldest CALLs to stay within its size bound", () => {
+    const c = new Correlator(1000, 100);
+    c.call("csms-a", "cp-to-csms", "a".repeat(30), call("t1"));
+    c.call("csms-a", "cp-to-csms", "b".repeat(30), call("t2"));
+    expect(c.answer("csms-a", "csms-to-cp", "a".repeat(30))).toBeUndefined();
+    expect(c.answer("csms-a", "csms-to-cp", "b".repeat(30))).toEqual(call("t2"));
+  });
 });
