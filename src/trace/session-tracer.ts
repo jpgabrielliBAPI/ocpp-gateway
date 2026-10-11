@@ -57,6 +57,18 @@ export interface ReceivedFrame {
   commit(): void;
 }
 
+/** How a received frame is routed, and where its CALLs and responses belong. */
+interface FrameRouting {
+  direction: Direction;
+  source: TraceSource;
+  destinations: Destination[];
+  ignored?: true;
+  /** Conversations (CSMS ids) in which a CALL of this frame awaits a response. */
+  callConversations: string[];
+  /** Conversation in which a response of this frame answers a CALL. */
+  responseConversation: string;
+}
+
 /**
  * Turns the frames of one charger session into trace documents, exactly one
  * per received frame, and correlates responses with their CALL. Pure
@@ -116,22 +128,29 @@ export class SessionTracer {
     }).commit();
   }
 
-  private receive(
-    raw: string,
-    binary: boolean,
-    route: {
-      direction: Direction;
-      source: TraceSource;
-      destinations: Destination[];
-      ignored?: true;
-      callConversations: string[];
-      responseConversation: string;
-    },
-  ): ReceivedFrame {
-    const { tenantId, sessionId, chargePointId } = this.context;
+  private receive(raw: string, binary: boolean, route: FrameRouting): ReceivedFrame {
+    // Only what must be captured at reception happens here; decoding and
+    // correlating wait for commit(), once the frame has been forwarded.
     const receivedAt = this.deps.now();
     const id = this.deps.newId();
     const seq = ++this.seq;
+    return new PendingFrame(
+      id,
+      () => this.build(raw, binary, route, { id, seq, receivedAt }),
+      route.destinations,
+      this.sink,
+      () => this.deps.now(),
+    );
+  }
+
+  /** The document of a received frame; called once, in reception order. */
+  private build(
+    raw: string,
+    binary: boolean,
+    route: FrameRouting,
+    { id, seq, receivedAt }: { id: string; seq: number; receivedAt: Date },
+  ): TraceDocument {
+    const { tenantId, sessionId, chargePointId } = this.context;
     const gateway: GatewayMeta = {
       traceId: id,
       tenantId,
@@ -144,7 +163,6 @@ export class SessionTracer {
     };
     const timestamp = receivedAt.toISOString();
     const ocppVersion = this.ocppVersion !== undefined ? { ocppVersion: this.ocppVersion } : {};
-    const now = () => this.deps.now();
     const base = { id, tenantId, sessionId, chargePointId, seq, receivedAt, deliveries: [] };
 
     const parsed = parseOcppFrame(raw);
@@ -158,12 +176,7 @@ export class SessionTracer {
         reason: parsed.reason,
         meta: { gateway },
       };
-      return new PendingFrame(
-        { ...base, kind: "frame", frame },
-        route.destinations,
-        this.sink,
-        now,
-      );
+      return { ...base, kind: "frame", frame };
     }
 
     const f = parsed.frame;
@@ -199,29 +212,28 @@ export class SessionTracer {
       ...(f.messageType === "CALLERROR" && { error: f.error }),
       meta: { gateway },
     };
-    return new PendingFrame({ ...base, kind: "trace", trace }, route.destinations, this.sink, now);
+    return { ...base, kind: "trace", trace };
   }
 }
 
 class PendingFrame implements ReceivedFrame {
-  private readonly id: string;
   /**
    * Released on commit: queued messages and pending sends keep their tracker
-   * alive, and must not keep the parsed document (payload included) with it.
+   * alive, and must not keep the raw frame nor its document with it.
    */
-  private doc: TraceDocument | null;
+  private build: (() => TraceDocument) | null;
   private readonly states: (Delivery | undefined)[];
   private committed = false;
   private accepted = false;
 
   constructor(
-    doc: TraceDocument,
+    private readonly id: string,
+    build: () => TraceDocument,
     private readonly destinations: Destination[],
     private readonly sink: TraceSink,
     private readonly now: () => Date,
   ) {
-    this.id = doc.id;
-    this.doc = doc;
+    this.build = build;
     this.states = destinations.map(() => undefined);
   }
 
@@ -243,8 +255,8 @@ class PendingFrame implements ReceivedFrame {
     this.states.forEach((state, index) => {
       if (state === undefined) this.update(index, "dropped", "not-forwarded");
     });
-    const doc = this.doc!;
-    this.doc = null;
+    const doc = this.build!();
+    this.build = null;
     // A copy: the sink owns the document, the states stay ours.
     doc.deliveries = this.states.slice() as Delivery[];
     this.accepted = this.sink.insert(doc);

@@ -7,6 +7,7 @@ import {
   UPSTREAM_MAX_QUEUE_BYTES,
 } from "../src/connection";
 import { configureLogger } from "../src/logger";
+import { parseOcppFrame } from "../src/trace/frame";
 import type { Backend } from "../src/routes";
 import { MemoryTraceSink } from "./trace/memory-sink";
 
@@ -17,6 +18,7 @@ interface MockSocket {
   options: { maxPayload?: number } | undefined;
   readyState: number;
   sent: string[];
+  send(data: string, callback?: (error?: Error) => void): void;
   /** Completion callbacks of the sends that passed one, in order. */
   callbacks: ((error?: Error) => void)[];
   /** When set, `send` throws it. */
@@ -84,6 +86,12 @@ vi.mock("ws", async () => {
   return {
     default: MockWebSocket,
   };
+});
+
+/* Spy on frame decoding for the archive, keeping its behaviour. */
+vi.mock("../src/trace/frame", async (importOriginal) => {
+  const original = await importOriginal<typeof import("../src/trace/frame")>();
+  return { ...original, parseOcppFrame: vi.fn(original.parseOcppFrame) };
 });
 
 /** Frame size limit every test session is created with. */
@@ -569,6 +577,28 @@ describe("ChargerConnection trace capture", () => {
     send(CALL("late"));
     expect(statuses(0)).toEqual([["dropped", "link-not-open"]]);
     expect(statuses(1)).toEqual([["dropped", "session-ended"]]);
+  });
+
+  it("forwards a frame before decoding it for the archive", () => {
+    const { charger, primary, mirrors, send } = startTracedSession();
+    primary.emit("open");
+    mirrors[0].emit("open");
+    const parse = vi.mocked(parseOcppFrame);
+    parse.mockClear();
+    const parsedAtSend: number[] = [];
+    for (const socket of [primary, mirrors[0], charger]) {
+      const original = socket.send.bind(socket);
+      socket.send = (data: string, callback?: (error?: Error) => void) => {
+        parsedAtSend.push(parse.mock.calls.length);
+        original(data, callback);
+      };
+    }
+    send(CALL("m1"));
+    primary.emit("message", Buffer.from('[3,"m1",{}]'), false);
+    // Sent to the primary and the mirror, then to the charger, each time
+    // before that frame was decoded.
+    expect(parsedAtSend).toEqual([0, 0, 1]);
+    expect(parse).toHaveBeenCalledTimes(2);
   });
 
   it("records a frame dropped because the primary link is gone", () => {
