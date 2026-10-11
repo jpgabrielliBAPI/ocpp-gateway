@@ -2,7 +2,13 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { RouteStore, buildTargetUrl, parseRouteTable, resolveRoute } from "../src/routes";
+import {
+  RouteStore,
+  buildTargetUrl,
+  loadRouteTable,
+  parseRouteTable,
+  resolveRoute,
+} from "../src/routes";
 
 const TABLE = {
   default: {
@@ -489,4 +495,15 @@ describe("RouteStore with required backend ids", () => {
       rmSync(dir, { recursive: true });
     }
   });
+});
+
+describe("committed examples", () => {
+  it.each(["routes.example.json", "routes.multi-tenant.example.json"])(
+    "%s is a valid routing table, ready for trace archiving",
+    (file) => {
+      expect(() =>
+        loadRouteTable(join(__dirname, "..", file), { requireBackendIds: true }),
+      ).not.toThrow();
+    },
+  );
 });

@@ -2,7 +2,7 @@
 
 A lightweight **OCPP WebSocket gateway** that sits between your EV chargers and one or more CSMS backends. Each charge point is routed by its **chargeBoxId** to its own **primary CSMS** (full bidirectional control) and, optionally, to one or more **secondary backends** that receive a read-only mirror of the charger's traffic — perfect for monitoring, analytics, or migrating between platforms without reconfiguring your chargers.
 
-A single endpoint serves every charger: the gateway reads the chargeBoxId from the connection URL and looks it up in a routing table. Built with Node.js and TypeScript. Supports OCPP 1.6 and 2.0.1.
+A single endpoint serves every charger: the gateway reads the chargeBoxId from the connection URL and looks it up in a routing table. Built with Node.js and TypeScript. Supports OCPP 1.6 and 2.0.1. Optionally, every OCPP frame can be archived in MongoDB as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) records — see [Trace archiving](#trace-archiving-optional).
 
 > Forked from [joulo-nl/joulo-ocpp-proxy](https://github.com/joulo-nl/joulo-ocpp-proxy) (MIT). The original uses a single global primary/secondary configuration for all chargers; this fork replaces it with a **per-chargeBoxId routing table**.
 
@@ -69,7 +69,8 @@ Routing is driven by a JSON file (path from `ROUTES_FILE`, default `./routes.jso
 - **`default`** (required, unless the file defines [`tenants`](#multi-tenant-routing)) — route used for any chargeBoxId not listed under `chargers`.
 - **`chargers`** (optional) — exact-match overrides keyed by chargeBoxId.
 - Each route has a `primary` backend (required) and `secondaries` (array of backends, optional).
-- A backend is either a URL string or an object `{ "url": "...", "appendChargeBoxId": false }`. `appendChargeBoxId` defaults to `true`; a bare string is shorthand for `{ "url": "...", "appendChargeBoxId": true }`.
+- A backend is either a URL string or an object `{ "id": "...", "url": "...", "appendChargeBoxId": false }`. `appendChargeBoxId` defaults to `true`; a bare string is shorthand for `{ "url": "...", "appendChargeBoxId": true }`.
+- `id` (optional, **required with [trace archiving](#trace-archiving-optional)**) is a stable name for the logical CSMS, used instead of its URL (which may carry credentials) wherever the gateway records it: 1–64 letters, digits, `.`, `_` or `-`, starting with a letter or digit. Within a route, ids are unique; within a scope (the global routes, or one tenant), the same id always names the same URL. Different tenants may reuse an id. [`routes.example.json`](routes.example.json) gives every backend an id.
 
 **Resolution:** for a charger with id `X`, the gateway uses `chargers["X"]` if present, otherwise `default`.
 
@@ -220,7 +221,12 @@ All configuration is done through environment variables:
 | `LOG_DEBUG_MESSAGE_MAX_LENGTH` | No       | `120`           | Max char length for debug payload summaries. Leave empty to disable truncation      |
 | `TENANT_BASE_DOMAIN`           | No       | —               | Tenants are subdomains of this domain (`acme.<domain>` → `acme`). See [Multi-tenant routing](#multi-tenant-routing) |
 | `TENANT_HOST_HEADER`           | No       | — (`Host`)      | Header holding the dialled hostname, set by a **trusted** reverse proxy (e.g. `x-forwarded-host`) |
-| `MAX_MESSAGE_BYTES`            | No       | `1048576`       | Largest WebSocket message (bytes, `1`–`2147483647`) accepted from a charger or a CSMS; a bigger one closes that connection with `1009`. See [Message size limit](#message-size-limit) |
+| `MAX_MESSAGE_BYTES`            | No       | `1048576`       | Largest WebSocket message (bytes, `1`–`2147483647`) accepted from a charger or a CSMS; a bigger one closes that connection with `1009`. See [Message size limit](#message-size-limit). At most `15728640` (15 MiB) with trace archiving |
+| `TRACE_ENABLED`                | No       | `false`         | Archive every OCPP frame in MongoDB. See [Trace archiving](#trace-archiving-optional) |
+| `TRACE_MONGODB_URI`            | With `TRACE_ENABLED` | —   | `mongodb://` or `mongodb+srv://` connection string. May carry credentials; never logged |
+| `TRACE_MONGODB_DATABASE`       | No       | `ocpp_gateway`  | Database holding the `ocpp_traces` collection                                       |
+| `TRACE_RETENTION_DAYS`         | No       | `30`            | Days each trace is kept (`1`–`36500`), through a MongoDB TTL index                  |
+| `TRACE_QUEUE_MAX`              | No       | `10000`         | Traces held in memory while waiting for MongoDB (`1`–`1000000`); more are dropped   |
 
 ### Message size limit
 
@@ -276,6 +282,120 @@ Set `LOG_DEBUG_MESSAGE_MAX_LENGTH` to a positive integer to cap logged `message`
 Debug output contains raw OCPP payloads (idTags, meter values…), so keep `LOG_LEVEL=debug` for troubleshooting rather than normal operation.
 Leave it unset for the default, or set it empty to disable truncation.
 
+## Trace archiving (optional)
+
+With `TRACE_ENABLED=true`, the gateway stores **every OCPP frame it receives** — from the charger, from the primary CSMS, and from each secondary CSMS — in the MongoDB collection `ocpp_traces`, as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) v1.1 records. Archiving is off by default; when off, no MongoDB connection is made, the driver is not even loaded, and forwarding is unchanged.
+
+```bash
+TRACE_ENABLED=true \
+TRACE_MONGODB_URI='mongodb://user:password@mongo.internal:27017/?authSource=admin' \
+TRACE_RETENTION_DAYS=30 \
+ROUTES_FILE=./routes.json npm start
+```
+
+To try it locally, `docker compose -f docker-compose.yml -f docker-compose.mongo.yml up --build` runs the gateway with a MongoDB reachable only from the Compose network.
+
+**Backend ids are required.** A trace names each CSMS by its backend `id` (see [Routing configuration](#routing-configuration)), never by its URL. With archiving enabled, the gateway refuses to start if a backend has no `id`, and a hot reload that removes one is rejected (the previous table stays in effect). A session keeps the ids of the route it connected with.
+
+### What is stored
+
+One document per received frame — never one per destination, and a frame replayed after a secondary reconnects is not stored again:
+
+```json
+{
+  "_id": "6f1c0d0e-…",
+  "kind": "trace",
+  "tenantId": "tenant-a",
+  "sessionId": "b2a4…",
+  "chargePointId": "CP-001",
+  "seq": 12,
+  "receivedAt": { "$date": "2026-10-11T10:00:00.000Z" },
+  "expiresAt": { "$date": "2026-11-10T10:00:00.000Z" },
+  "deliveries": [
+    { "target": "csms-a", "role": "primary", "status": "written", "updatedAt": { "$date": "…" } },
+    { "target": "analytics", "role": "secondary", "status": "queued", "updatedAt": { "$date": "…" } }
+  ],
+  "trace": {
+    "schemaVersion": "1.1",
+    "timestamp": "2026-10-11T10:00:00.000Z",
+    "ocppVersion": "1.6",
+    "transport": "json",
+    "chargePointId": "CP-001",
+    "connectorId": 1,
+    "direction": "cp-to-csms",
+    "messageType": "CALL",
+    "messageId": "19223201",
+    "action": "StatusNotification",
+    "payload": { "connectorId": 1, "status": "Charging", "errorCode": "NoError" },
+    "raw": "[2,\"19223201\",\"StatusNotification\",{\"connectorId\":1,\"status\":\"Charging\",\"errorCode\":\"NoError\"}]",
+    "meta": {
+      "gateway": {
+        "traceId": "6f1c0d0e-…",
+        "tenantId": "tenant-a",
+        "sessionId": "b2a4…",
+        "seq": 12,
+        "source": { "type": "charge-point", "id": "CP-001" },
+        "destinations": [
+          { "target": "csms-a", "role": "primary" },
+          { "target": "analytics", "role": "secondary" }
+        ]
+      }
+    }
+  }
+}
+```
+
+- **`trace`** is a standard Open OCPP Trace record, valid against the spec's JSON Schema, and never modified once written. `raw` is the frame exactly as received (never re-serialised); `payload` is its parsed form. `direction` is relative to the charge point / CSMS pair. Gateway extensions live under `meta.gateway`, the spec's extension point:
+  - `tenantId` (`null` without tenant), `sessionId` (one per charger WebSocket connection, so two connections of the same charger never mix), `seq` (reception order within the session), `traceId` (the document `_id`);
+  - `source`: `{ "type": "charge-point", "id": <chargeBoxId> }` or `{ "type": "csms", "id": <backend id>, "role": "primary" | "secondary" }`;
+  - `destinations`: where the routing sent the frame, fixed at reception (the primary then each secondary for a charger frame, the charger for a primary frame, none for a secondary frame);
+  - `ignored: true` on secondary CSMS frames, which are archived but never forwarded;
+  - `correlation: { callTraceId, action }` on a CALLRESULT or CALLERROR that answers a known CALL (see below);
+  - `binary: true` when the frame arrived as a binary WebSocket message.
+- **`deliveries`** (in the document, not in `trace`, because it keeps changing after the frame is received) has one entry per destination, in the same order, with the latest known outcome:
+
+| Status      | Meaning                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------- |
+| `queued`    | Held by the gateway while the link is not open (primary connecting, secondary reconnecting)  |
+| `submitted` | Handed to the WebSocket                                                                       |
+| `written`   | The WebSocket wrote it to the TCP connection. **Not** a proof the peer received or processed it: only an OCPP response is |
+| `failed`    | The WebSocket reported an error (`reason` holds it)                                           |
+| `dropped`   | Discarded by the gateway — `reason`: `queue-overflow` (oldest message evicted from a full queue), `session-ended` (still queued when the session ended), `link-not-open` (the link was closing or closed) |
+
+  Statuses only move forward (`queued` → `submitted` → a final status), so a late or repeated update never overwrites a newer one. Usually a frame is written once, with its final outcome already known.
+- **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. A record too large for a MongoDB document once parsed (BSON can take several times the JSON size) is also stored this way, with `reason: "document-too-large"`: `raw` is kept whole, never truncated. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
+- **Indexes:** `{ expiresAt: 1 }` (TTL), `{ tenantId: 1, chargePointId: 1, receivedAt: 1 }` (a charger's history) and `{ tenantId: 1, sessionId: 1, seq: 1 }` (one session in order; a `messageId` lookup within a session only scans that session's documents). They are created at the first write.
+
+### Requests, responses, primary and secondaries
+
+A response is correlated with its CALL using the Open OCPP Trace rule — same `messageId`, opposite direction, most recent CALL not yet answered — applied **per conversation**: the exchange between the charger and one CSMS within one session. A charger CALL mirrored to the primary and to secondaries can therefore be answered once in each conversation, and a secondary's response never counts as the answer to the charger. Responses get no `action` field (consumers derive it from the CALL); `meta.gateway.correlation` names the CALL and its action. An orphan response (no matching CALL, e.g. after a reconnect) has no `correlation`; an unanswered CALL simply has no response pointing to it.
+
+To export one conversation as a standard trace (e.g. JSONL for Open OCPP Trace tools), select the session's documents where `meta.gateway.source.id` is that CSMS, or the source is the charger and that CSMS is among `meta.gateway.destinations`, sort by `seq`, and emit `trace`. The primary's conversation is the authoritative one, the one the charger took part in. Merge `deliveries` into `meta.gateway.deliveries` if the outcomes are wanted too.
+
+### Retention
+
+Each document expires `TRACE_RETENTION_DAYS` after it was received: `expiresAt` is set at insert and MongoDB's TTL monitor deletes expired documents in the background, about once a minute, so deletion is not instantaneous. Changing the setting only affects new traces. Retention is global; per-tenant retention is not supported yet. Backups of the database keep traces beyond their expiry: apply the same retention to them.
+
+### Failure behaviour
+
+Archiving never delays nor breaks forwarding. Frames are queued in memory and written by batches in the background; MongoDB is never awaited on the forwarding path.
+
+- MongoDB down or slow: each batch is retried twice with backoff, then dropped. The gateway starts and keeps forwarding while MongoDB is unreachable.
+- The in-memory queue is bounded (`TRACE_QUEUE_MAX` traces and 64 MiB estimated): when full, new traces are dropped. Memory stays bounded during an outage.
+- On shutdown (`SIGTERM`/`SIGINT`), sessions end first (queued frames are recorded as `dropped`, `session-ended`), then pending traces are written for up to 3 seconds; whatever is left is dropped.
+- Every loss is counted: the `trace stats` log line (every minute, when something changed) reports `accepted`, `persisted`, `writeFailures`, `dropped` (`queueFull`, `writeFailed`, `rejected`, `shutdown`), `deliveryUpdates` and the queue size; `trace store unavailable` / `trace store available again` mark outages.
+
+### Data sensitivity
+
+Traces contain whole OCPP payloads: RFID tags (`idTag`), transaction and meter data, firmware and vendor-specific data — personal data in many jurisdictions. Treat the database accordingly: never expose MongoDB publicly (keep it on a private network, enable authentication and TLS), restrict who can read it, and set the shortest retention that serves your purpose. The gateway never stores `Authorization` headers or CSMS URLs, and never logs the MongoDB URI.
+
+### Known limitations
+
+- `written` means written to the socket, not received by the peer.
+- Binary WebSocket frames are archived as the text the gateway forwards (decoded as UTF-8), flagged `binary: true`.
+- A CALL to the secondaries is correlated per secondary, but the gateway does not track the secondaries' own CALLs (the charger never sees them).
+- The [Cloudflare deployment](deploy/cloudflare/) does not pass `TRACE_*` variables to the gateway.
+
 ## Development
 
 ```bash
@@ -287,6 +407,15 @@ npm run build      # bundle with Vite+ (vp pack / Rolldown) → dist/index.cjs
 npm test           # run unit + integration tests (Vitest)
 npm run dev        # watch-bundle and run
 ```
+
+The trace archiving tests that need a real MongoDB are skipped unless `TRACE_TEST_MONGODB_URI` is set (CI runs them with a MongoDB service):
+
+```bash
+docker run -d --rm --name ocpp-gateway-mongo -p 127.0.0.1:27017:27017 mongo:8.0
+TRACE_TEST_MONGODB_URI=mongodb://127.0.0.1:27017 npm test
+```
+
+Trace records are validated against the official Open OCPP Trace schema and reference fixtures, vendored under [`test/fixtures/open-ocpp-trace/`](test/fixtures/open-ocpp-trace/) (Apache-2.0).
 
 Tests cover route resolution (`chargers[id]` vs `default`, per-tenant routes, target-URL construction), tenant resolution from the hostname, session isolation per `(tenantId, chargeBoxId)`, the Cloudflare Worker header boundary (`deploy/cloudflare/test/`), and end-to-end integration scenarios with mock primary/secondary CSMS servers verifying that the primary is bidirectional, secondary responses never reach the charger, and `Authorization` + sub-protocol are propagated.
 
