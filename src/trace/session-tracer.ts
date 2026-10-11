@@ -204,16 +204,24 @@ export class SessionTracer {
 }
 
 class PendingFrame implements ReceivedFrame {
+  private readonly id: string;
+  /**
+   * Released on commit: queued messages and pending sends keep their tracker
+   * alive, and must not keep the parsed document (payload included) with it.
+   */
+  private doc: TraceDocument | null;
   private readonly states: (Delivery | undefined)[];
   private committed = false;
   private accepted = false;
 
   constructor(
-    private readonly doc: TraceDocument,
+    doc: TraceDocument,
     private readonly destinations: Destination[],
     private readonly sink: TraceSink,
     private readonly now: () => Date,
   ) {
+    this.id = doc.id;
+    this.doc = doc;
     this.states = destinations.map(() => undefined);
   }
 
@@ -235,9 +243,11 @@ class PendingFrame implements ReceivedFrame {
     this.states.forEach((state, index) => {
       if (state === undefined) this.update(index, "dropped", "not-forwarded");
     });
+    const doc = this.doc!;
+    this.doc = null;
     // A copy: the sink owns the document, the states stay ours.
-    this.doc.deliveries = this.states.slice() as Delivery[];
-    this.accepted = this.sink.insert(this.doc);
+    doc.deliveries = this.states.slice() as Delivery[];
+    this.accepted = this.sink.insert(doc);
   }
 
   private update(index: number, status: DeliveryStatus, reason?: string): void {
@@ -253,6 +263,6 @@ class PendingFrame implements ReceivedFrame {
       updatedAt: this.now(),
     };
     this.states[index] = delivery;
-    if (this.committed && this.accepted) this.sink.updateDelivery(this.doc.id, index, delivery);
+    if (this.committed && this.accepted) this.sink.updateDelivery(this.id, index, delivery);
   }
 }
