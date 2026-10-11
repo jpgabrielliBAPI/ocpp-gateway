@@ -274,6 +274,21 @@ describe("BufferedTraceWriter", () => {
       expect(writer.stats().dropped.shutdown).toBe(1);
     });
 
+    it("counts delivery updates still being written at the timeout as dropped", async () => {
+      const { store, writer } = setup();
+      writer.insert(makeDoc("a"));
+      await vi.advanceTimersByTimeAsync(250);
+      store.gate = new Promise(() => {});
+      writer.updateDelivery("a", 0, delivery("written"));
+      await vi.advanceTimersByTimeAsync(250);
+      expect(store.updateCalls).toHaveLength(1);
+
+      const closed = writer.close(1_000);
+      await vi.advanceTimersByTimeAsync(1_000);
+      await closed;
+      expect(writer.stats().deliveryUpdates).toEqual({ applied: 0, dropped: 1, failed: 0 });
+    });
+
     it("writes delivery updates reported while closing", async () => {
       const { store, writer } = setup();
       writer.insert(makeDoc("a"));
@@ -287,7 +302,8 @@ describe("BufferedTraceWriter", () => {
 
     it("gives up after the timeout, counting what was left as dropped", async () => {
       const { store, writer } = setup({ batchSize: 1 });
-      store.gate = new Promise(() => {});
+      let release!: () => void;
+      store.gate = new Promise((resolve) => (release = resolve));
       writer.insert(makeDoc("a"));
       writer.insert(makeDoc("b"));
       const closed = writer.close(3_000);
@@ -298,9 +314,27 @@ describe("BufferedTraceWriter", () => {
       expect(done).toBe(false);
       await vi.advanceTimersByTimeAsync(1);
       expect(done).toBe(true);
-      // "a" is stuck in flight, "b" never left the queue.
-      expect(writer.stats().dropped.shutdown).toBe(1);
+      // "a" is stuck in flight, "b" never left the queue: both are lost, and
+      // nothing is held any more.
+      const accounted = (stats: ReturnType<typeof writer.stats>) =>
+        stats.persisted +
+        Object.values(stats.dropped).reduce((sum, n) => sum + n, 0) +
+        stats.queued;
+      expect(writer.stats()).toMatchObject({
+        accepted: 2,
+        queued: 0,
+        queuedBytes: 0,
+        dropped: { shutdown: 2 },
+      });
+      expect(accounted(writer.stats())).toBe(2);
       expect(messages()).toContain("trace writer closed with pending traces");
+
+      // The abandoned write finishing late changes nothing.
+      store.gate = null;
+      release();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(writer.stats()).toMatchObject({ persisted: 0, queued: 0, dropped: { shutdown: 2 } });
+      expect(accounted(writer.stats())).toBe(2);
     });
   });
 

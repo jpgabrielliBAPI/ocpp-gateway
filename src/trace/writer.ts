@@ -116,8 +116,11 @@ export class BufferedTraceWriter implements TraceSink {
   private readonly waiting = new Map<string, Entry>();
   /** Latest pending update per `id#index`. */
   private readonly updates = new Map<string, DeliveryUpdate>();
+  /** Documents held in memory: waiting, or in the batch being written. */
   private queued = 0;
   private queuedBytes = 0;
+  /** Delivery updates being written, if any. */
+  private writingUpdates = 0;
   private state: "open" | "closing" | "closed" = "open";
   private closing: Promise<void> | null = null;
   private running: Promise<void> | null = null;
@@ -234,14 +237,17 @@ export class BufferedTraceWriter implements TraceSink {
     const timeout = await Promise.race([flushed, timedOut]);
     clearTimeout(deadline);
 
+    // From now on, a write still running is abandoned: its outcome is ignored.
     this.state = "closed";
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
-    const left = this.waiting.size + this.updates.size;
-    this.counters.dropped.shutdown += this.waiting.size;
-    this.counters.deliveryUpdates.dropped += this.updates.size;
+    const left = this.queued + this.updates.size + this.writingUpdates;
+    this.counters.dropped.shutdown += this.queued;
+    this.counters.deliveryUpdates.dropped += this.updates.size + this.writingUpdates;
     this.waiting.clear();
     this.updates.clear();
+    this.queued = 0;
+    this.queuedBytes = 0;
     if (left > 0 || timeout) {
       log.warn("trace writer closed with pending traces", { ...this.stats(), timedOut: timeout });
     } else {
@@ -309,6 +315,8 @@ export class BufferedTraceWriter implements TraceSink {
     const docs = batch.map((entry) => entry.doc);
     try {
       const result = await this.attempt(() => this.store.insertMany(docs));
+      // Abandoned by a close that timed out: already counted as dropped.
+      if (this.closed) return;
       if (result) {
         this.counters.persisted += docs.length - result.rejected.length;
         this.counters.dropped.rejected += result.rejected.length;
@@ -320,14 +328,20 @@ export class BufferedTraceWriter implements TraceSink {
         log.error("trace batch dropped after failed writes", { count: docs.length });
       }
     } finally {
-      this.queued -= batch.length;
-      this.queuedBytes -= batch.reduce((sum, entry) => sum + entry.bytes, 0);
-      if (this.queueFull && this.queued < this.options.maxQueue) this.queueFull = false;
+      if (!this.closed) {
+        this.queued -= batch.length;
+        this.queuedBytes -= batch.reduce((sum, entry) => sum + entry.bytes, 0);
+        if (this.queueFull && this.queued < this.options.maxQueue) this.queueFull = false;
+      }
     }
   }
 
   private async writeUpdates(updates: DeliveryUpdate[]): Promise<void> {
+    this.writingUpdates = updates.length;
     const done = await this.attempt(() => this.store.updateDeliveries(updates).then(() => true));
+    this.writingUpdates = 0;
+    // Abandoned by a close that timed out: already counted as dropped.
+    if (this.closed) return;
     if (done) {
       this.counters.deliveryUpdates.applied += updates.length;
     } else {
