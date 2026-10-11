@@ -173,8 +173,19 @@ export class SessionTracer {
   }
 
   /** @internal Shared by the frames of this session. */
-  insert(doc: TraceDocument): boolean {
-    return this.sink.insert(doc);
+  insert(doc: TraceDocument, routing: FrameRouting): boolean {
+    const accepted = this.sink.insert(doc);
+    // Only a CALL the sink accepted may be pointed to by a response.
+    if (accepted && doc.kind === "trace" && doc.trace.messageType === "CALL") {
+      const { messageId, action } = doc.trace;
+      for (const conversation of routing.callConversations) {
+        this.correlator.call(conversation, routing.direction, messageId, {
+          traceId: doc.id,
+          action: action!,
+        });
+      }
+    }
+    return accepted;
   }
 
   /** @internal Shared by the frames of this session. */
@@ -213,14 +224,9 @@ export class SessionTracer {
     if (!parsed.ok) return { ...base, kind: "frame", frame: unparsedFrame(common, parsed.reason) };
 
     const f = parsed.frame;
-    if (f.messageType === "CALL") {
-      for (const conversation of routing.callConversations) {
-        this.correlator.call(conversation, routing.direction, f.messageId, {
-          traceId: id,
-          action: f.action,
-        });
-      }
-    } else {
+    // A CALL is remembered once archived (see insert); a response consumes its
+    // CALL even if the response itself is then refused: it was answered.
+    if (f.messageType !== "CALL") {
       const call = this.correlator.answer(
         routing.responseConversation,
         routing.direction,
@@ -286,11 +292,12 @@ class PendingFrame implements ReceivedFrame {
     this.states.forEach((state, index) => {
       if (state === undefined) this.update(index, "dropped", "not-forwarded");
     });
-    const doc = this.tracer.build(this.reception!);
+    const reception = this.reception!;
     this.reception = null;
+    const doc = this.tracer.build(reception);
     // A copy: the sink owns the document, the states stay ours.
     doc.deliveries = this.states.slice() as Delivery[];
-    this.accepted = this.tracer.insert(doc);
+    this.accepted = this.tracer.insert(doc, reception.routing);
   }
 
   update(index: number, status: DeliveryStatus, reason?: string): void {

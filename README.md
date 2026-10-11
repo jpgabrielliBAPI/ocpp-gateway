@@ -368,7 +368,7 @@ One document per received frame — never one per destination, and a frame repla
 
 ### Requests, responses, primary and secondaries
 
-A response is correlated with its CALL using the Open OCPP Trace rule — same `messageId`, opposite direction, most recent CALL not yet answered — applied **per conversation**: the exchange between the charger and one CSMS within one session. A charger CALL mirrored to the primary and to secondaries can therefore be answered once in each conversation, and a secondary's response never counts as the answer to the charger. Responses get no `action` field (consumers derive it from the CALL); `meta.gateway.correlation` names the CALL and its action. An orphan response (no matching CALL, e.g. after a reconnect) has no `correlation`; an unanswered CALL simply has no response pointing to it.
+A response is correlated with its CALL using the Open OCPP Trace rule — same `messageId`, opposite direction, most recent CALL not yet answered — applied **per conversation**: the exchange between the charger and one CSMS within one session. A charger CALL mirrored to the primary and to secondaries can therefore be answered once in each conversation, and a secondary's response never counts as the answer to the charger. Responses get no `action` field (consumers derive it from the CALL); `meta.gateway.correlation` names the CALL and its action. An orphan response (no matching CALL, e.g. after a reconnect) has no `correlation`; an unanswered CALL simply has no response pointing to it. A response never points to a CALL whose trace the gateway refused (full queue); but a CALL accepted and then lost before reaching MongoDB (failed writes, shutdown timeout — both counted in `trace stats`) leaves its responses pointing to a missing document: persistence is asynchronous by design.
 
 To export one conversation as a standard trace (e.g. JSONL for Open OCPP Trace tools), select the session's documents where `meta.gateway.source.id` is that CSMS, or the source is the charger and that CSMS is among `meta.gateway.destinations`, sort by `seq`, and emit `trace`. The primary's conversation is the authoritative one, the one the charger took part in. Merge `deliveries` into `meta.gateway.deliveries` if the outcomes are wanted too.
 
@@ -392,6 +392,7 @@ Traces contain whole OCPP payloads: RFID tags (`idTag`), transaction and meter d
 ### Known limitations
 
 - `written` means written to the socket, not received by the peer.
+- `meta.gateway.correlation.callTraceId` may name a CALL whose trace was lost after being queued (see [Requests, responses, primary and secondaries](#requests-responses-primary-and-secondaries)).
 - Binary WebSocket frames are archived as the text the gateway forwards (decoded as UTF-8), flagged `binary: true`; one that is not valid UTF-8 (decoded with replacement characters) is stored as a raw frame with `reason: "lossy-binary"`, since `raw` would not be the bytes received.
 - A CALL to the secondaries is correlated per secondary, but the gateway does not track the secondaries' own CALLs (the charger never sees them).
 - The [Cloudflare deployment](deploy/cloudflare/) does not pass `TRACE_*` variables to the gateway.

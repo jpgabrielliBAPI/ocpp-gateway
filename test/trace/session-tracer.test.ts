@@ -204,6 +204,20 @@ describe("SessionTracer", () => {
     expectConforming(sink.docs, ["csms-main"]);
   });
 
+  it("never points a response to a CALL whose trace was refused", () => {
+    const { sink, tracer } = setup();
+    sink.accept = false;
+    tracer.fromCharger(BOOT).commit();
+    sink.accept = true;
+    tracer.fromPrimary('[3,"m1",{"status":"Accepted"}]').commit();
+    tracer.fromSecondary("mirror-1", '[3,"m1",{"status":"Accepted"}]');
+
+    expect(sink.traces()).toHaveLength(2);
+    for (const response of sink.traces()) {
+      expect(response.meta.gateway.correlation).toBeUndefined();
+    }
+  });
+
   it("leaves orphan responses uncorrelated", () => {
     const { sink, tracer } = setup();
     tracer.fromPrimary('[3,"never-sent",{}]').commit();
