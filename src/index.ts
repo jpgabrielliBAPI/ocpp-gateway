@@ -42,7 +42,11 @@ async function main() {
 
   const gateway = startProxy(config, routes, { traceSink: archive?.sink });
 
+  let shuttingDown = false;
   const shutdown = () => {
+    // A second signal must not restart the shutdown (and exit mid-flush).
+    if (shuttingDown) return;
+    shuttingDown = true;
     log.info("shutting down…");
     routes.close();
     setTimeout(
