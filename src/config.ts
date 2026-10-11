@@ -92,7 +92,7 @@ function parseMongodbUri(value: string | undefined): string {
 function parseDatabaseName(value: string | undefined): string {
   if (value === undefined || value.trim() === "") return DEFAULT_TRACE_DATABASE;
   const name = value.trim();
-  if (/[/\\. "$*<>:|?\0]/.test(name) || Buffer.byteLength(name) > 63) {
+  if (/[/\\. "$*<>:|?]/.test(name) || name.includes("\0") || Buffer.byteLength(name) > 63) {
     throw new Error(`Invalid database name: "${value}"`);
   }
   return name;
