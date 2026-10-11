@@ -235,6 +235,14 @@ describe("BufferedTraceWriter", () => {
       expect(writer.insert(makeDoc("nested", nested))).toBe(false);
     });
 
+    it("always accepts a document when nothing else is held, however large", async () => {
+      const { writer } = setup({ maxQueueBytes: 1_000 });
+      expect(writer.insert(makeDoc("big", "x".repeat(10_000)))).toBe(true);
+      expect(writer.insert(makeDoc("next"))).toBe(false);
+      await vi.advanceTimersByTimeAsync(250);
+      expect(writer.insert(makeDoc("after"))).toBe(true);
+    });
+
     it("frees the room once written", async () => {
       const { writer } = setup({ maxQueue: 1 });
       writer.insert(makeDoc("a"));

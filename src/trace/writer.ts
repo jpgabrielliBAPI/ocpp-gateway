@@ -99,7 +99,8 @@ function estimateBytes(doc: TraceDocument): number {
  * are written by batches in the background, one batch at a time, so MongoDB
  * never slows down or breaks forwarding.
  *
- * - A full queue (by count or bytes) refuses new documents: memory stays bounded.
+ * - A full queue (by count or bytes) refuses new documents: memory stays
+ *   bounded (above the byte bound only by one document, when it is alone).
  * - Failed writes are retried with backoff, then the batch is dropped.
  * - A delivery update for a document still waiting is merged into it (one
  *   write per frame in the common case); others are written after the
@@ -146,9 +147,11 @@ export class BufferedTraceWriter implements TraceSink {
       return false;
     }
     const bytes = estimateBytes(doc);
+    // An empty queue takes any document, so the largest frame the gateway
+    // accepts (MAX_MESSAGE_BYTES) can always be archived.
     if (
       this.queued >= this.options.maxQueue ||
-      this.queuedBytes + bytes > this.options.maxQueueBytes
+      (this.queued > 0 && this.queuedBytes + bytes > this.options.maxQueueBytes)
     ) {
       this.counters.dropped.queueFull++;
       if (!this.queueFull) {
