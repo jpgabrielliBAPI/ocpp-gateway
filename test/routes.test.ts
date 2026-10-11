@@ -370,7 +370,7 @@ describe("backend ids", () => {
         default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
         chargers: { "CP-1": { primary: { id: "csms", url: "wss://b.example.com/ocpp" } } },
       }),
-    ).toThrow(/backend id "csms" names different URLs/);
+    ).toThrow(/backend id "csms" names different servers/);
     expect(() =>
       parseRouteTable({
         tenants: {
@@ -385,7 +385,7 @@ describe("backend ids", () => {
           },
         },
       }),
-    ).toThrow(/backend id "csms" names different URLs in tenant "acme"/);
+    ).toThrow(/backend id "csms" names different servers in tenant "acme"/);
   });
 
   it("does not leak backend URLs in id errors", () => {
@@ -395,6 +395,40 @@ describe("backend ids", () => {
         chargers: { "CP-1": { primary: { id: "csms", url: "wss://b.example.com/ocpp" } } },
       }),
     ).toThrow(/^(?!.*secret).*$/);
+  });
+
+  it("lets one CSMS id name per-charger endpoints of the same server", () => {
+    const t = parseRouteTable({
+      default: { primary: { id: "csms", url: "wss://csms.example.com/ocpp" } },
+      chargers: {
+        "CP-1": {
+          primary: { id: "csms", url: "wss://csms.example.com/ep/AAAA", appendChargeBoxId: false },
+        },
+        "CP-2": {
+          primary: {
+            id: "csms",
+            url: "wss://user:token@csms.example.com/ep/BBBB?key=1",
+            appendChargeBoxId: false,
+          },
+        },
+      },
+    });
+    expect(t.chargers.get("CP-2")?.primary.id).toBe("csms");
+  });
+
+  it("rejects an id naming another server, even on another port or scheme", () => {
+    for (const url of [
+      "wss://other.example.com/ocpp",
+      "wss://csms.example.com:8443/ocpp",
+      "ws://csms.example.com/ocpp",
+    ]) {
+      expect(() =>
+        parseRouteTable({
+          default: { primary: { id: "csms", url: "wss://csms.example.com/ocpp" } },
+          chargers: { "CP-1": { primary: { id: "csms", url } } },
+        }),
+      ).toThrow(/backend id "csms" names different servers in the global routes/);
+    }
   });
 
   it("lets routes of a scope share an id for the same URL", () => {

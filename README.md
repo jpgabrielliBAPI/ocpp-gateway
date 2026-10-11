@@ -70,7 +70,7 @@ Routing is driven by a JSON file (path from `ROUTES_FILE`, default `./routes.jso
 - **`chargers`** (optional) — exact-match overrides keyed by chargeBoxId.
 - Each route has a `primary` backend (required) and `secondaries` (array of backends, optional).
 - A backend is either a URL string or an object `{ "id": "...", "url": "...", "appendChargeBoxId": false }`. `appendChargeBoxId` defaults to `true`; a bare string is shorthand for `{ "url": "...", "appendChargeBoxId": true }`.
-- `id` (optional, **required with [trace archiving](#trace-archiving-optional)**) is a stable name for the logical CSMS, used instead of its URL (which may carry credentials) wherever the gateway records it: 1–64 letters, digits, `.`, `_` or `-`, starting with a letter or digit. Within a route, ids are unique; within a scope (the global routes, or one tenant), the same id always names the same URL. Different tenants may reuse an id. [`routes.example.json`](routes.example.json) gives every backend an id.
+- `id` (optional, **required with [trace archiving](#trace-archiving-optional)**) is a stable name for the logical CSMS, used instead of its URL (which may carry credentials) wherever the gateway records it: 1–64 letters, digits, `.`, `_` or `-`, starting with a letter or digit. Within a route, ids are unique; within a scope (the global routes, or one tenant), the same id always names the same server — scheme, host and port — while paths, queries and credentials may differ (e.g. per-charger endpoints with `appendChargeBoxId: false`). Different tenants may reuse an id. [`routes.example.json`](routes.example.json) gives every backend an id.
 
 **Resolution:** for a charger with id `X`, the gateway uses `chargers["X"]` if present, otherwise `default`.
 

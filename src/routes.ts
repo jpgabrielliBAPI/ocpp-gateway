@@ -142,18 +142,23 @@ function parseRoute(value: unknown, where: string, options: RouteTableOptions): 
   return { primary, secondaries };
 }
 
-/** Within a scope, a backend id names one logical CSMS: always the same URL. */
+/**
+ * Within a scope, a backend id names one logical CSMS: always the same server
+ * (scheme, host and port). Paths, queries and credentials may differ, e.g.
+ * per-charger endpoints with `appendChargeBoxId: false`.
+ */
 function checkBackendIds(scope: RouteScope, label: string): void {
-  const urls = new Map<string, string>();
+  const servers = new Map<string, string>();
   const routes = [...(scope.default ? [scope.default] : []), ...scope.chargers.values()];
   for (const route of routes) {
     for (const { id, url } of [route.primary, ...route.secondaries]) {
       if (id === undefined) continue;
-      const known = urls.get(id);
-      if (known !== undefined && known !== url) {
-        throw new Error(`backend id "${id}" names different URLs in ${label}`);
+      const server = new URL(url).origin;
+      const known = servers.get(id);
+      if (known !== undefined && known !== server) {
+        throw new Error(`backend id "${id}" names different servers in ${label}`);
       }
-      urls.set(id, url);
+      servers.set(id, server);
     }
   }
 }
