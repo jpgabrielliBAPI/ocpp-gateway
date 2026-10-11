@@ -33,6 +33,10 @@ export interface ProxyOptions {
  * that backend opts out.
  */
 export function startProxy(config: Config, routes: RouteStore, options: ProxyOptions = {}) {
+  // Traces name each CSMS by its backend id: every route must have them.
+  if (options.traceSink && !routes.requiresBackendIds) {
+    throw new Error("trace archiving needs a route store loaded with requireBackendIds");
+  }
   const tenants =
     options.tenants ??
     new HostnameTenantResolver({

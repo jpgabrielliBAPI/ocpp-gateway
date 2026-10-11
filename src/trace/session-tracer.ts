@@ -15,6 +15,7 @@ import {
   type TraceDocument,
   type TraceSource,
   ocppVersionOf,
+  unparsedFrame,
 } from "./record";
 import type { TraceSink } from "./writer";
 
@@ -31,10 +32,16 @@ export interface SessionTracerContext {
   secondaryIds: readonly string[];
 }
 
-export interface SessionTracerDeps {
+interface SessionTracerDeps {
   now(): Date;
   newId(): string;
 }
+
+/**
+ * How a frame arrived: a text message, a binary one holding valid UTF-8, or a
+ * binary one that is not (decoded with U+FFFD, so the text is not the frame).
+ */
+export type FrameEncoding = "text" | "binary" | "lossy-binary";
 
 /** Reports what happened to a frame on its way to one destination. Monotonic. */
 export interface DeliveryTracker {
@@ -69,6 +76,16 @@ interface FrameRouting {
   responseConversation: string;
 }
 
+/** What is captured when a frame arrives; decoded into a document on commit. */
+interface Reception {
+  id: string;
+  seq: number;
+  receivedAt: Date;
+  raw: string;
+  encoding: FrameEncoding;
+  routing: FrameRouting;
+}
+
 /**
  * Turns the frames of one charger session into trace documents, exactly one
  * per received frame, and correlates responses with their CALL. Pure
@@ -77,6 +94,9 @@ interface FrameRouting {
 export class SessionTracer {
   private readonly correlator = new Correlator();
   private readonly ocppVersion: string | undefined;
+  private readonly chargerRouting: FrameRouting;
+  private readonly primaryRouting: FrameRouting;
+  private readonly secondaryRoutings = new Map<string, FrameRouting>();
   private seq = 0;
 
   constructor(
@@ -84,13 +104,9 @@ export class SessionTracer {
     private readonly sink: TraceSink,
     private readonly deps: SessionTracerDeps = { now: () => new Date(), newId: randomUUID },
   ) {
+    const { chargePointId, primaryId, secondaryIds } = context;
     this.ocppVersion = ocppVersionOf(context.protocol);
-  }
-
-  /** A frame from the charger, routed to the primary then every secondary. */
-  fromCharger(raw: string, binary = false): ReceivedFrame {
-    const { chargePointId, primaryId, secondaryIds } = this.context;
-    return this.receive(raw, binary, {
+    this.chargerRouting = {
       direction: "cp-to-csms",
       source: { type: "charge-point", id: chargePointId },
       destinations: [
@@ -100,100 +116,116 @@ export class SessionTracer {
       callConversations: [primaryId, ...secondaryIds],
       // The charger only ever answers CALLs it received: the primary's.
       responseConversation: primaryId,
-    });
-  }
-
-  /** A frame from the primary CSMS, routed to the charger. */
-  fromPrimary(raw: string, binary = false): ReceivedFrame {
-    const { chargePointId, primaryId } = this.context;
-    return this.receive(raw, binary, {
+    };
+    this.primaryRouting = {
       direction: "csms-to-cp",
       source: { type: "csms", id: primaryId, role: "primary" },
       destinations: [{ target: chargePointId, role: "charge-point" }],
       callConversations: [primaryId],
       responseConversation: primaryId,
-    });
+    };
+  }
+
+  /** A frame from the charger, routed to the primary then every secondary. */
+  fromCharger(raw: string, encoding: FrameEncoding = "text"): ReceivedFrame {
+    return this.receive(raw, encoding, this.chargerRouting);
+  }
+
+  /** A frame from the primary CSMS, routed to the charger. */
+  fromPrimary(raw: string, encoding: FrameEncoding = "text"): ReceivedFrame {
+    return this.receive(raw, encoding, this.primaryRouting);
   }
 
   /** A frame from a secondary CSMS: archived as ignored, never forwarded. */
-  fromSecondary(id: string, raw: string, binary = false): void {
-    this.receive(raw, binary, {
-      direction: "csms-to-cp",
-      source: { type: "csms", id, role: "secondary" },
-      destinations: [],
-      ignored: true,
-      // The charger never sees a secondary's CALLs, so nothing answers them.
-      callConversations: [],
-      responseConversation: id,
-    }).commit();
+  fromSecondary(id: string, raw: string, encoding: FrameEncoding = "text"): void {
+    let routing = this.secondaryRoutings.get(id);
+    if (!routing) {
+      routing = {
+        direction: "csms-to-cp",
+        source: { type: "csms", id, role: "secondary" },
+        destinations: [],
+        ignored: true,
+        // The charger never sees a secondary's CALLs, so nothing answers them.
+        callConversations: [],
+        responseConversation: id,
+      };
+      this.secondaryRoutings.set(id, routing);
+    }
+    this.receive(raw, encoding, routing).commit();
   }
 
-  private receive(raw: string, binary: boolean, route: FrameRouting): ReceivedFrame {
+  private receive(raw: string, encoding: FrameEncoding, routing: FrameRouting): ReceivedFrame {
     // Only what must be captured at reception happens here; decoding and
     // correlating wait for commit(), once the frame has been forwarded.
-    const receivedAt = this.deps.now();
-    const id = this.deps.newId();
-    const seq = ++this.seq;
-    return new PendingFrame(
-      id,
-      () => this.build(raw, binary, route, { id, seq, receivedAt }),
-      route.destinations,
-      this.sink,
-      () => this.deps.now(),
-    );
+    return new PendingFrame(this, {
+      id: this.deps.newId(),
+      seq: ++this.seq,
+      receivedAt: this.deps.now(),
+      raw,
+      encoding,
+      routing,
+    });
   }
 
-  /** The document of a received frame; called once, in reception order. */
-  private build(
-    raw: string,
-    binary: boolean,
-    route: FrameRouting,
-    { id, seq, receivedAt }: { id: string; seq: number; receivedAt: Date },
-  ): TraceDocument {
+  /** @internal Shared by the frames of this session. */
+  now(): Date {
+    return this.deps.now();
+  }
+
+  /** @internal Shared by the frames of this session. */
+  insert(doc: TraceDocument): boolean {
+    return this.sink.insert(doc);
+  }
+
+  /** @internal Shared by the frames of this session. */
+  updateDelivery(id: string, index: number, delivery: Delivery): void {
+    this.sink.updateDelivery(id, index, delivery);
+  }
+
+  /** @internal The document of a received frame; called once per frame, in reception order. */
+  build({ id, seq, receivedAt, raw, encoding, routing }: Reception): TraceDocument {
     const { tenantId, sessionId, chargePointId } = this.context;
     const gateway: GatewayMeta = {
       traceId: id,
       tenantId,
       sessionId,
       seq,
-      source: route.source,
-      destinations: route.destinations,
-      ...(route.ignored && { ignored: true }),
-      ...(binary && { binary: true }),
+      source: routing.source,
+      destinations: routing.destinations,
+      ...(routing.ignored && { ignored: true }),
+      ...(encoding !== "text" && { binary: true }),
     };
-    const timestamp = receivedAt.toISOString();
-    const ocppVersion = this.ocppVersion !== undefined ? { ocppVersion: this.ocppVersion } : {};
+    const common = {
+      timestamp: receivedAt.toISOString(),
+      ...(this.ocppVersion !== undefined && { ocppVersion: this.ocppVersion }),
+      chargePointId,
+      direction: routing.direction,
+      raw,
+      meta: { gateway },
+    };
     const base = { id, tenantId, sessionId, chargePointId, seq, receivedAt, deliveries: [] };
 
-    // ws decodes a binary frame holding invalid UTF-8 with U+FFFD: `raw` would
-    // not be the frame received, so it never becomes a trace record.
+    // A lossily decoded frame is not the frame received: never a trace record.
     const parsed =
-      binary && raw.includes("\uFFFD")
+      encoding === "lossy-binary"
         ? ({ ok: false, reason: "lossy-binary" } as const)
         : parseOcppFrame(raw);
-    if (!parsed.ok) {
-      const frame = {
-        timestamp,
-        ...ocppVersion,
-        chargePointId,
-        direction: route.direction,
-        raw,
-        reason: parsed.reason,
-        meta: { gateway },
-      };
-      return { ...base, kind: "frame", frame };
-    }
+    if (!parsed.ok) return { ...base, kind: "frame", frame: unparsedFrame(common, parsed.reason) };
 
     const f = parsed.frame;
     if (f.messageType === "CALL") {
-      for (const conversation of route.callConversations) {
-        this.correlator.call(conversation, route.direction, f.messageId, {
+      for (const conversation of routing.callConversations) {
+        this.correlator.call(conversation, routing.direction, f.messageId, {
           traceId: id,
           action: f.action,
         });
       }
     } else {
-      const call = this.correlator.answer(route.responseConversation, route.direction, f.messageId);
+      const call = this.correlator.answer(
+        routing.responseConversation,
+        routing.direction,
+        f.messageId,
+      );
       if (call) gateway.correlation = { callTraceId: call.traceId, action: call.action };
     }
 
@@ -201,12 +233,12 @@ export class SessionTracer {
     const connectorId = connectorIdOf(payload);
     const trace: OcppTraceRecord = {
       schemaVersion: TRACE_SCHEMA_VERSION,
-      timestamp,
-      ...ocppVersion,
+      timestamp: common.timestamp,
+      ...(this.ocppVersion !== undefined && { ocppVersion: this.ocppVersion }),
       transport: "json",
       chargePointId,
       ...(connectorId !== undefined && { connectorId }),
-      direction: route.direction,
+      direction: routing.direction,
       messageType: f.messageType,
       messageId: f.messageId,
       // Responses carry no action: consumers derive it from the correlated
@@ -222,35 +254,29 @@ export class SessionTracer {
 }
 
 class PendingFrame implements ReceivedFrame {
+  private readonly id: string;
+  private readonly destinations: Destination[];
   /**
    * Released on commit: queued messages and pending sends keep their tracker
    * alive, and must not keep the raw frame nor its document with it.
    */
-  private build: (() => TraceDocument) | null;
+  private reception: Reception | null;
   private readonly states: (Delivery | undefined)[];
   private committed = false;
   private accepted = false;
 
   constructor(
-    private readonly id: string,
-    build: () => TraceDocument,
-    private readonly destinations: Destination[],
-    private readonly sink: TraceSink,
-    private readonly now: () => Date,
+    private readonly tracer: SessionTracer,
+    reception: Reception,
   ) {
-    this.build = build;
-    this.states = destinations.map(() => undefined);
+    this.id = reception.id;
+    this.destinations = reception.routing.destinations;
+    this.reception = reception;
+    this.states = this.destinations.map(() => undefined);
   }
 
   delivery(index: number): DeliveryTracker {
-    return {
-      queued: () => this.update(index, "queued"),
-      submitted: () => this.update(index, "submitted"),
-      settled: (error) =>
-        error ? this.update(index, "failed", error.message) : this.update(index, "written"),
-      dropped: (reason) => this.update(index, "dropped", reason),
-      failed: (reason) => this.update(index, "failed", reason),
-    };
+    return new FrameDelivery(this, index);
   }
 
   commit(): void {
@@ -260,14 +286,14 @@ class PendingFrame implements ReceivedFrame {
     this.states.forEach((state, index) => {
       if (state === undefined) this.update(index, "dropped", "not-forwarded");
     });
-    const doc = this.build!();
-    this.build = null;
+    const doc = this.tracer.build(this.reception!);
+    this.reception = null;
     // A copy: the sink owns the document, the states stay ours.
     doc.deliveries = this.states.slice() as Delivery[];
-    this.accepted = this.sink.insert(doc);
+    this.accepted = this.tracer.insert(doc);
   }
 
-  private update(index: number, status: DeliveryStatus, reason?: string): void {
+  update(index: number, status: DeliveryStatus, reason?: string): void {
     const destination = this.destinations[index];
     if (destination === undefined) return;
     const current = this.states[index];
@@ -277,9 +303,37 @@ class PendingFrame implements ReceivedFrame {
       ...destination,
       status,
       ...(reason !== undefined && { reason }),
-      updatedAt: this.now(),
+      updatedAt: this.tracer.now(),
     };
     this.states[index] = delivery;
-    if (this.committed && this.accepted) this.sink.updateDelivery(this.id, index, delivery);
+    if (this.committed && this.accepted) this.tracer.updateDelivery(this.id, index, delivery);
+  }
+}
+
+class FrameDelivery implements DeliveryTracker {
+  constructor(
+    private readonly frame: PendingFrame,
+    private readonly index: number,
+  ) {}
+
+  queued(): void {
+    this.frame.update(this.index, "queued");
+  }
+
+  submitted(): void {
+    this.frame.update(this.index, "submitted");
+  }
+
+  settled(error: Error | null | undefined): void {
+    if (error) this.frame.update(this.index, "failed", error.message);
+    else this.frame.update(this.index, "written");
+  }
+
+  dropped(reason: DropReason): void {
+    this.frame.update(this.index, "dropped", reason);
+  }
+
+  failed(reason: string): void {
+    this.frame.update(this.index, "failed", reason);
   }
 }

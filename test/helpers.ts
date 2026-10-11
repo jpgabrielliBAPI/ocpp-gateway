@@ -24,7 +24,9 @@ export async function startGateway(
   const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-test-"));
   const routesFile = join(dir, "routes.json");
   writeFileSync(routesFile, JSON.stringify(table));
-  const routes = RouteStore.load(routesFile);
+  const routes = RouteStore.load(routesFile, {
+    requireBackendIds: options.traceSink !== undefined,
+  });
   rmSync(dir, { recursive: true });
 
   const gateway = startProxy(

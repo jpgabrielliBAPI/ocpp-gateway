@@ -1,5 +1,5 @@
 import { createLogger } from "../logger";
-import { maskUserinfo } from "../utils/url";
+import { errorMessage } from "../utils/errors";
 import { DELIVERY_STATUS_RANK, type Delivery, type TraceDocument } from "./record";
 
 const log = createLogger("trace");
@@ -21,7 +21,10 @@ export interface DeliveryUpdate {
   delivery: Delivery;
 }
 
-/** Persistence port of the writer (MongoDB in production). */
+/**
+ * Persistence port of the writer (MongoDB in production). Errors it throws are
+ * logged as is: they must never carry credentials.
+ */
 export interface TraceStore {
   /**
    * Insert idempotently: a document already stored counts as inserted, so a
@@ -47,7 +50,7 @@ export interface TraceWriterOptions {
   statsIntervalMs: number;
 }
 
-export const DEFAULT_TRACE_WRITER_OPTIONS: Omit<TraceWriterOptions, "maxQueue"> = {
+const DEFAULT_TRACE_WRITER_OPTIONS: Omit<TraceWriterOptions, "maxQueue"> = {
   maxQueueBytes: 64 * 1024 * 1024,
   batchSize: 500,
   flushIntervalMs: 250,
@@ -56,7 +59,7 @@ export const DEFAULT_TRACE_WRITER_OPTIONS: Omit<TraceWriterOptions, "maxQueue"> 
   statsIntervalMs: 60_000,
 };
 
-export interface TraceWriterStats {
+interface TraceWriterStats {
   accepted: number;
   persisted: number;
   /** Failed write attempts (each may be retried). */
@@ -116,7 +119,7 @@ export class BufferedTraceWriter implements TraceSink {
   private queued = 0;
   private queuedBytes = 0;
   private state: "open" | "closing" | "closed" = "open";
-  private aborted = false;
+  private closing: Promise<void> | null = null;
   private running: Promise<void> | null = null;
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly statsTimer: ReturnType<typeof setInterval>;
@@ -169,7 +172,7 @@ export class BufferedTraceWriter implements TraceSink {
   }
 
   updateDelivery(id: string, index: number, delivery: Delivery): void {
-    if (this.state === "closed") {
+    if (this.closed) {
       this.counters.deliveryUpdates.dropped++;
       return;
     }
@@ -203,14 +206,17 @@ export class BufferedTraceWriter implements TraceSink {
 
   /**
    * Stop accepting documents and write what is pending, giving up after
-   * `timeoutMs`: whatever is left then is counted as dropped.
+   * `timeoutMs`: whatever is left then is counted as dropped. Calling it
+   * again returns the same, still running, close.
    */
-  async close(timeoutMs: number): Promise<void> {
-    if (this.state !== "open") return;
+  close(timeoutMs: number): Promise<void> {
+    this.closing ??= this.closeOnce(timeoutMs);
+    return this.closing;
+  }
+
+  private async closeOnce(timeoutMs: number): Promise<void> {
     this.state = "closing";
     clearInterval(this.statsTimer);
-    if (this.timer) clearTimeout(this.timer);
-    this.timer = null;
 
     let deadline: ReturnType<typeof setTimeout> | undefined;
     const timedOut = new Promise<boolean>((resolve) => {
@@ -222,14 +228,13 @@ export class BufferedTraceWriter implements TraceSink {
       do {
         await new Promise<void>((resolve) => setImmediate(resolve));
         await this.drain();
-      } while (this.hasWork() && !this.aborted);
+      } while (this.hasWork() && !this.closed);
       return false;
     })();
     const timeout = await Promise.race([flushed, timedOut]);
     clearTimeout(deadline);
 
     this.state = "closed";
-    if (timeout) this.aborted = true;
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
     const left = this.waiting.size + this.updates.size;
@@ -244,13 +249,18 @@ export class BufferedTraceWriter implements TraceSink {
     }
   }
 
+  /** Closed: also stops a write cycle still running after a close timed out. */
+  private get closed(): boolean {
+    return this.state === "closed";
+  }
+
   private hasWork(): boolean {
     return this.waiting.size > 0 || this.updates.size > 0;
   }
 
   /** Run a write cycle soon (sooner once a batch is full), outside the caller's stack. */
   private schedule(): void {
-    if (this.running || this.state === "closed") return;
+    if (this.running || this.closed) return;
     const urgent = this.waiting.size >= this.options.batchSize || this.state === "closing";
     if (this.timer && !urgent) return;
     if (this.timer) clearTimeout(this.timer);
@@ -274,10 +284,10 @@ export class BufferedTraceWriter implements TraceSink {
   }
 
   private async writeAll(): Promise<void> {
-    while (!this.aborted && this.hasWork()) {
+    while (!this.closed && this.hasWork()) {
       if (this.waiting.size > 0) await this.writeBatch(this.takeBatch());
       // Updates go after the inserts they may refer to.
-      if (!this.aborted && this.updates.size > 0) {
+      if (!this.closed && this.updates.size > 0) {
         const updates = [...this.updates.values()];
         this.updates.clear();
         await this.writeUpdates(updates);
@@ -341,11 +351,11 @@ export class BufferedTraceWriter implements TraceSink {
         if (this.storeAvailable) {
           this.storeAvailable = false;
           log.error("trace store unavailable", {
-            error: maskUserinfo(err instanceof Error ? err.message : String(err)),
+            error: errorMessage(err),
             ...this.queueStats(),
           });
         }
-        if (attempt >= this.options.maxAttempts || this.aborted) return undefined;
+        if (attempt >= this.options.maxAttempts || this.closed) return undefined;
         await sleep(this.options.retryDelayMs * 2 ** (attempt - 1));
       }
     }

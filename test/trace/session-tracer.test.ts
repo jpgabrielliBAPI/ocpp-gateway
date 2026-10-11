@@ -1,9 +1,9 @@
 import { describe, expect, it } from "vitest";
-import type { OcppTraceRecord, TraceDocument } from "../../src/trace/record";
 import { SessionTracer, type SessionTracerContext } from "../../src/trace/session-tracer";
 import {
   type SpecRecord,
   buildConsumerView,
+  expectConforming,
   loadFixtures,
   rawFidelityErrors,
   schemaErrors,
@@ -30,35 +30,6 @@ function setup(context: Partial<SessionTracerContext> = {}, start = T0) {
     { now: () => new Date(now++), newId: () => `trace-${++ids}` },
   );
   return { sink, tracer };
-}
-
-/** Records of the conversation between the charger and the CSMS `backendId`, in order. */
-function conversationView(docs: TraceDocument[], backendId: string): OcppTraceRecord[] {
-  return docs
-    .flatMap((d) => (d.kind === "trace" ? [d.trace] : []))
-    .filter(({ meta: { gateway } }) =>
-      gateway.source.type === "csms"
-        ? gateway.source.id === backendId
-        : gateway.destinations.some((d) => d.target === backendId),
-    )
-    .sort((a, b) => a.meta.gateway.seq - b.meta.gateway.seq);
-}
-
-/** Every record conforms to the spec, and our correlation agrees with the reference consumer's. */
-function expectConformingView(records: OcppTraceRecord[]) {
-  for (const record of records) {
-    expect(schemaErrors(record)).toEqual([]);
-    expect(rawFidelityErrors(record as unknown as SpecRecord)).toEqual([]);
-  }
-  const view = buildConsumerView(records as unknown as SpecRecord[]);
-  records.forEach((record, i) => {
-    const expected = view.records[i].correlatesWith;
-    const ours = record.meta.gateway.correlation;
-    expect(ours?.callTraceId).toBe(
-      expected === undefined ? undefined : records[expected].meta.gateway.traceId,
-    );
-    if (ours) expect(ours.action).toBe(view.records[i].action);
-  });
 }
 
 const BOOT = '[2,"m1","BootNotification",{"chargePointVendor":"V","chargePointModel":"M"}]';
@@ -202,9 +173,7 @@ describe("SessionTracer", () => {
     expect(mirror.action).toBeUndefined();
     expect(primary.action).toBeUndefined();
 
-    expectConformingView(conversationView(sink.docs, "csms-main"));
-    expectConformingView(conversationView(sink.docs, "mirror-1"));
-    expectConformingView(conversationView(sink.docs, "mirror-2"));
+    expectConforming(sink.docs, ["csms-main", "mirror-1", "mirror-2"]);
   });
 
   it("correlates a CALLERROR", () => {
@@ -219,7 +188,7 @@ describe("SessionTracer", () => {
       meta: { gateway: { correlation: { callTraceId: call.meta.gateway.traceId } } },
     });
     expect(error.payload).toBeUndefined();
-    expectConformingView(conversationView(sink.docs, "csms-main"));
+    expectConforming(sink.docs, ["csms-main"]);
   });
 
   it("correlates a charger response to a CALL from the primary", () => {
@@ -232,7 +201,7 @@ describe("SessionTracer", () => {
       callTraceId: call.meta.gateway.traceId,
       action: "RemoteStartTransaction",
     });
-    expectConformingView(conversationView(sink.docs, "csms-main"));
+    expectConforming(sink.docs, ["csms-main"]);
   });
 
   it("leaves orphan responses uncorrelated", () => {
@@ -260,11 +229,11 @@ describe("SessionTracer", () => {
 
   it("flags binary frames", () => {
     const { sink, tracer } = setup();
-    tracer.fromCharger('[2,"m1","Heartbeat",{}]', true).commit();
+    tracer.fromCharger('[2,"m1","Heartbeat",{}]', "binary").commit();
     expect(sink.traces()[0].meta.gateway.binary).toBe(true);
   });
 
-  it("never claims a binary frame decoded with replacement characters is verbatim", () => {
+  it("stores a lossily decoded binary frame as a raw frame, never as a verbatim record", () => {
     const { sink, tracer } = setup();
     // What ws hands over for a binary frame holding invalid UTF-8.
     const raw = Buffer.from([
@@ -272,7 +241,7 @@ describe("SessionTracer", () => {
       0xff,
       ...Buffer.from('"}]'),
     ]).toString();
-    tracer.fromCharger(raw, true).commit();
+    tracer.fromCharger(raw, "lossy-binary").commit();
     expect(sink.docs[0].kind === "frame" && sink.docs[0].frame).toMatchObject({
       raw,
       reason: "lossy-binary",
@@ -399,7 +368,7 @@ describe("SessionTracer against the reference fixtures", () => {
       const traces = sink.traces();
       expect(traces.map(({ meta: _meta, ...standard }) => standard)).toEqual(fixture.records);
       expect(buildConsumerView(traces as unknown as SpecRecord[])).toEqual(fixture.expected);
-      expectConformingView(traces);
+      expectConforming(sink.docs, ["csms"]);
     });
   }
 });

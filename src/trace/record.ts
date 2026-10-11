@@ -12,7 +12,7 @@ export type TraceSource =
   | { type: "charge-point"; id: string }
   | { type: "csms"; id: string; role: "primary" | "secondary" };
 
-export type DestinationRole = "primary" | "secondary" | "charge-point";
+type DestinationRole = "primary" | "secondary" | "charge-point";
 
 /** A peer the gateway routed a frame to, decided when the frame was received. */
 export interface Destination {
@@ -84,6 +84,32 @@ export interface UnparsedFrame {
    */
   reason: UnparsedReason | "lossy-binary" | "document-too-large" | "not-storable";
   meta: { gateway: GatewayMeta };
+}
+
+/** The raw-frame form of a received frame, for one that cannot be (stored as) a trace record. */
+export function unparsedFrame(
+  {
+    timestamp,
+    ocppVersion,
+    chargePointId,
+    direction,
+    raw,
+    meta,
+  }: Pick<
+    OcppTraceRecord,
+    "timestamp" | "ocppVersion" | "chargePointId" | "direction" | "raw" | "meta"
+  >,
+  reason: UnparsedFrame["reason"],
+): UnparsedFrame {
+  return {
+    timestamp,
+    ...(ocppVersion !== undefined && { ocppVersion }),
+    chargePointId,
+    direction,
+    raw,
+    reason,
+    meta,
+  };
 }
 
 /**

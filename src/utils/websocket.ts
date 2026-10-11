@@ -1,3 +1,4 @@
+import { isUtf8 } from "node:buffer";
 import WebSocket from "ws";
 
 export function forwardPing(ws: WebSocket | null, data: Buffer): void {
@@ -18,8 +19,16 @@ export function forwardPong(ws: WebSocket | null, data: Buffer): void {
   }
 }
 
+function rawDataToBuffer(data: WebSocket.RawData): Buffer {
+  if (Array.isArray(data)) return Buffer.concat(data);
+  return Buffer.isBuffer(data) ? data : Buffer.from(data);
+}
+
 export function rawDataToString(data: WebSocket.RawData): string {
-  if (Array.isArray(data)) return Buffer.concat(data).toString();
-  if (Buffer.isBuffer(data)) return data.toString();
-  return Buffer.from(data).toString();
+  return rawDataToBuffer(data).toString();
+}
+
+/** Whether the bytes are valid UTF-8, i.e. decode to text without replacement characters. */
+export function isUtf8Data(data: WebSocket.RawData): boolean {
+  return isUtf8(rawDataToBuffer(data));
 }

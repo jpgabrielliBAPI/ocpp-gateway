@@ -1,16 +1,19 @@
 import { once } from "node:events";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { MongoTraceStore } from "../src/trace/mongo-store";
-import type { OcppTraceRecord, TraceDocument } from "../src/trace/record";
+import type { TraceDocument } from "../src/trace/record";
 import { SessionTracer } from "../src/trace/session-tracer";
 import { BufferedTraceWriter } from "../src/trace/writer";
-import { connectWhenOpen, makeCsms, sleep, startGateway, waitFor, waitForClose } from "./helpers";
 import {
-  type SpecRecord,
-  buildConsumerView,
-  rawFidelityErrors,
-  schemaErrors,
-} from "./trace/conformance";
+  boot,
+  connectWhenOpen,
+  makeCsms,
+  sleep,
+  startGateway,
+  waitFor,
+  waitForClose,
+} from "./helpers";
+import { expectConforming } from "./trace/conformance";
 import { MemoryTraceSink } from "./trace/memory-sink";
 import { FakeStore } from "./trace/memory-store";
 
@@ -65,49 +68,9 @@ async function csmsFor(...servers: Csms[]) {
   return servers;
 }
 
-const BOOT = (id = "m1") =>
-  JSON.stringify([2, id, "BootNotification", { chargePointVendor: "V", chargePointModel: "M" }]);
-
 const traceOf = (doc: TraceDocument | undefined) => (doc?.kind === "trace" ? doc.trace : undefined);
 const settled = (doc: TraceDocument) =>
   doc.deliveries.every((d) => d.status !== "queued" && d.status !== "submitted");
-
-/**
- * Every record conforms, and our correlation is the spec's within each
- * conversation, for the records it is the home of: a CSMS's frames, and the
- * charger's frames for the primary (a charger response mirrored to a
- * secondary is correlated with the primary's CALL, never the secondary's).
- */
-function expectConforming(docs: TraceDocument[], backendIds: string[]) {
-  const records = docs.flatMap((d) => (d.kind === "trace" ? [d.trace] : []));
-  for (const record of records) {
-    expect(schemaErrors(record)).toEqual([]);
-    expect(rawFidelityErrors(record as unknown as SpecRecord)).toEqual([]);
-  }
-  for (const backendId of backendIds) {
-    const view = records
-      .filter(({ meta: { gateway } }) =>
-        gateway.source.type === "csms"
-          ? gateway.source.id === backendId
-          : gateway.destinations.some((d) => d.target === backendId),
-      )
-      .sort((a, b) => a.meta.gateway.seq - b.meta.gateway.seq);
-    const consumer = buildConsumerView(view as unknown as SpecRecord[]);
-    view.forEach((record: OcppTraceRecord, i) => {
-      if (homeConversation(record) !== backendId) return;
-      const expected = consumer.records[i].correlatesWith;
-      expect(record.meta.gateway.correlation?.callTraceId).toBe(
-        expected === undefined ? undefined : view[expected].meta.gateway.traceId,
-      );
-    });
-  }
-}
-
-function homeConversation({ meta: { gateway } }: OcppTraceRecord) {
-  return gateway.source.type === "csms"
-    ? gateway.source.id
-    : gateway.destinations.find((d) => d.role === "primary")?.target;
-}
 
 describe("trace archiving through the gateway", () => {
   it("archives a charger CALL and the primary's CALLRESULT, correlated", async () => {
@@ -116,7 +79,7 @@ describe("trace archiving through the gateway", () => {
     const { port } = await start(routes(primary), { traceSink: sink });
     const { charger, received } = await connect(port);
 
-    charger.send(BOOT());
+    charger.send(boot("m1"));
     await waitFor(() => received.length === 1);
     await waitFor(() => sink.docs.length === 2 && sink.docs.every(settled));
 
@@ -130,7 +93,7 @@ describe("trace archiving through the gateway", () => {
       action: "BootNotification",
       chargePointId: "CP-001",
       ocppVersion: "1.6",
-      raw: BOOT(),
+      raw: boot("m1"),
     });
     expect(result.deliveries).toMatchObject([
       { target: "CP-001", role: "charge-point", status: "written" },
@@ -161,7 +124,7 @@ describe("trace archiving through the gateway", () => {
     const { charger, received } = await connect(port);
     await waitFor(() => mirror1.connected() && mirror2.connected());
 
-    charger.send(BOOT());
+    charger.send(boot("m1"));
     await waitFor(() => sink.docs.length === 4 && sink.docs.every(settled));
     await sleep(100);
 
@@ -250,7 +213,7 @@ describe("trace archiving through the gateway", () => {
     const { charger } = await connect(port);
     await waitFor(() => primary.connected() && mirror.heldHandshakes() === 1);
 
-    charger.send(BOOT());
+    charger.send(boot("m1"));
     await waitFor(() => sink.docs.length >= 1 && sink.docs[0].deliveries[0].status === "written");
     const closed = waitForClose(charger);
     primary.connections()[0].ws.terminate();
@@ -282,7 +245,7 @@ describe("trace archiving through the gateway", () => {
     const { port } = await start(routes(primary), { traceSink: writer });
     const { charger, received } = await connect(port);
 
-    for (let i = 0; i < 5; i++) charger.send(BOOT(`m${i}`));
+    for (let i = 0; i < 5; i++) charger.send(boot(`m${i}`));
     await waitFor(() => received.length === 5, 1000);
     await waitFor(() => writer.stats().dropped.writeFailed === 10, 5000);
     expect(writer.stats()).toMatchObject({ persisted: 0, queued: 0 });
@@ -296,7 +259,7 @@ describe("trace archiving through the gateway", () => {
     const { port } = await start(routes(primary), { traceSink: writer });
     const { charger, received } = await connect(port);
 
-    for (let i = 0; i < 5; i++) charger.send(BOOT(`m${i}`));
+    for (let i = 0; i < 5; i++) charger.send(boot(`m${i}`));
     await waitFor(() => received.length === 5);
     expect(writer.stats()).toMatchObject({ accepted: 2, queued: 2, dropped: { queueFull: 8 } });
   });
@@ -312,7 +275,7 @@ describe("trace archiving through the gateway", () => {
     const { charger, received } = await connect(gateway.port);
     await waitFor(() => primary.connected() && mirror.heldHandshakes() === 1);
 
-    charger.send(BOOT());
+    charger.send(boot("m1"));
     await waitFor(() => received.length === 1);
     expect(store.insertCalls).toEqual([]);
 
@@ -343,9 +306,9 @@ describe("trace archiving through the gateway", () => {
     const a = await connect(port, "CP-001", { host: "acme.ocpp.example.com" });
     const b = await connect(port, "CP-001", { host: "beta.ocpp.example.com" });
 
-    a.charger.send(BOOT());
+    a.charger.send(boot("m1"));
     await waitFor(() => a.received.length === 1);
-    b.charger.send(BOOT());
+    b.charger.send(boot("m1"));
     await waitFor(() => b.received.length === 1 && sink.docs.length === 4);
 
     const byTenant = (tenant: string) => sink.docs.filter((d) => d.tenantId === tenant);
@@ -374,7 +337,7 @@ describe("trace archiving through the gateway", () => {
     const { port } = await start(routes(primary), { traceSink: sink });
 
     const first = await connect(port);
-    first.charger.send(BOOT());
+    first.charger.send(boot("m1"));
     await waitFor(() => sink.docs.length === 1);
     first.charger.close();
     await waitFor(
@@ -385,8 +348,8 @@ describe("trace archiving through the gateway", () => {
     second.charger.send(JSON.stringify([2, "m1", "Heartbeat", {}]));
     await waitFor(() => second.received.length === 1 && sink.docs.length === 3);
 
-    const [boot, heartbeat, result] = sink.docs;
-    expect(boot.sessionId).not.toBe(heartbeat.sessionId);
+    const [bootNotification, heartbeat, result] = sink.docs;
+    expect(bootNotification.sessionId).not.toBe(heartbeat.sessionId);
     expect(traceOf(result)?.meta.gateway.correlation).toEqual({
       callTraceId: heartbeat.id,
       action: "Heartbeat",
@@ -400,9 +363,9 @@ describe("trace archiving through the gateway", () => {
     const { port } = await start(routes(primary));
     const { charger, received } = await connect(port);
 
-    charger.send(BOOT());
+    charger.send(boot("m1"));
     await waitFor(() => received.length === 1);
-    expect(primary.received()).toEqual([BOOT()]);
+    expect(primary.received()).toEqual([boot("m1")]);
     expect(spy).not.toHaveBeenCalled();
   });
 });

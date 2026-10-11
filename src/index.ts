@@ -42,11 +42,7 @@ async function main() {
 
   const gateway = startProxy(config, routes, { traceSink: archive?.sink });
 
-  let shuttingDown = false;
   const shutdown = () => {
-    // A second signal must not restart the shutdown (and exit mid-flush).
-    if (shuttingDown) return;
-    shuttingDown = true;
     log.info("shutting down…");
     routes.close();
     setTimeout(
@@ -54,7 +50,8 @@ async function main() {
       SHUTDOWN_TIMEOUT_MS + (archive ? TRACE_FLUSH_TIMEOUT_MS : 0),
     ).unref();
     // close() ends every session synchronously, so their last trace outcomes
-    // are already reported when the archive starts flushing.
+    // are already reported when the archive starts flushing. A repeated
+    // signal waits for that same flush (archive.close() is idempotent).
     const closing = gateway.close();
     void Promise.all([closing, archive?.close()]).then(() => process.exit(0));
   };

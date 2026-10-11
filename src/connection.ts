@@ -3,12 +3,13 @@ import WebSocket from "ws";
 import { createLogger } from "./logger";
 import { type Route, buildTargetUrl } from "./routes";
 import { type SessionKey, formatSessionKey } from "./sessions";
-import { type DeliveryTracker, SessionTracer } from "./trace/session-tracer";
+import { type DeliveryTracker, type FrameEncoding, SessionTracer } from "./trace/session-tracer";
 import type { TraceSink } from "./trace/writer";
+import { errorMessage } from "./utils/errors";
 import { OCPP_SUBPROTOCOLS } from "./types";
 import { BoundedQueue } from "./utils/bounded-queue";
 import { redactUrl } from "./utils/url";
-import { forwardPing, forwardPong, rawDataToString } from "./utils/websocket";
+import { forwardPing, forwardPong, isUtf8Data, rawDataToString } from "./utils/websocket";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -109,11 +110,11 @@ export class ChargerConnection {
       return;
     }
 
-    this.route.secondaries.forEach((backend, index) => {
+    for (const backend of this.route.secondaries) {
       const url = buildTargetUrl(backend, this.key.chargeBoxId);
       const state: SecondaryState = {
-        // Ids are required when archiving; the fallback only names a test's backend.
-        id: backend.id ?? `secondary-${index + 1}`,
+        // Only read when archiving, which requires backend ids (see startProxy).
+        id: backend.id!,
         url,
         logUrl: redactUrl(url),
         ws: null,
@@ -127,10 +128,10 @@ export class ChargerConnection {
       } catch (err) {
         // A secondary must never affect the charger or the primary: skip it.
         this.log.error("secondary skipped", { url: state.logUrl, error: errorMessage(err) });
-        return;
+        continue;
       }
       this.secondaries.push(state);
-    });
+    }
 
     // Destinations are the secondaries actually set up, in forwarding order.
     if (this.traceSink) {
@@ -140,7 +141,7 @@ export class ChargerConnection {
           tenantId: this.key.tenantId,
           chargePointId: this.key.chargeBoxId,
           protocol: this.protocol,
-          primaryId: this.route.primary.id ?? "primary",
+          primaryId: this.route.primary.id!,
           secondaryIds: this.secondaries.map((sec) => sec.id),
         },
         this.traceSink,
@@ -151,7 +152,19 @@ export class ChargerConnection {
       const raw = rawDataToString(data);
       this.log.debugOcppFrame("charger → proxy", raw);
       // Archived once, here at ingress, however many links it goes to.
-      const frame = this.tracer?.fromCharger(raw, isBinary);
+      const frame = this.tracer?.fromCharger(raw, encodingOf(data, isBinary));
+
+      // ws still delivers frames in flight while the charger closes: nothing
+      // forwards them once the session has ended.
+      if (!this.alive) {
+        this.log.warn("session ended, dropping message");
+        if (frame) {
+          for (let i = 0; i <= this.secondaries.length; i++)
+            frame.delivery(i).dropped("session-ended");
+          frame.commit();
+        }
+        return;
+      }
 
       const primary = this.primary;
       const primaryDelivery = frame?.delivery(0);
@@ -230,7 +243,7 @@ export class ChargerConnection {
     ws.on("message", (data, isBinary) => {
       const raw = rawDataToString(data);
       this.log.debugOcppFrame("primary → charger", raw);
-      const frame = this.tracer?.fromPrimary(raw, isBinary);
+      const frame = this.tracer?.fromPrimary(raw, encodingOf(data, isBinary));
       if (this.charger.readyState === WebSocket.OPEN) {
         send(this.charger, raw, frame?.delivery(0));
       } else {
@@ -295,7 +308,7 @@ export class ChargerConnection {
         return;
       }
       this.log.debugOcppFrame("secondary response (ignored)", raw, { url: state.logUrl });
-      this.tracer?.fromSecondary(state.id, raw, isBinary);
+      this.tracer?.fromSecondary(state.id, raw, encodingOf(data, isBinary));
     });
 
     ws.on("pong", () => {
@@ -338,11 +351,6 @@ export class ChargerConnection {
     message: QueuedMessage,
     fields: Record<string, unknown> = {},
   ) {
-    // A frame still arriving while the charger closes: nothing will flush it.
-    if (!this.alive) {
-      message.delivery?.dropped("session-ended");
-      return;
-    }
     message.delivery?.queued();
     const dropped = queue.push(message);
     for (const old of dropped) old.delivery?.dropped("queue-overflow");
@@ -492,6 +500,8 @@ function queueStats(queue: BoundedQueue<QueuedMessage>) {
   };
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/** How a frame arrived, for the archive: bytes that are not UTF-8 were decoded lossily. */
+function encodingOf(data: WebSocket.RawData, isBinary: boolean): FrameEncoding {
+  if (!isBinary) return "text";
+  return isUtf8Data(data) ? "binary" : "lossy-binary";
 }

@@ -3,6 +3,7 @@ import { type FSWatcher, watch } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { createLogger } from "./logger";
 import { type TenantId, isTenantId, parseHostname } from "./tenants";
+import { isPlainObject } from "./utils/objects";
 import { redactUrl } from "./utils/url";
 
 const log = createLogger("routes");
@@ -75,10 +76,6 @@ function parseUrl(value: unknown, where: string): string {
     throw new Error(`${where} url "${redactUrl(value)}" must use ws:, wss:, http: or https:`);
   }
   return value;
-}
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 /** Accept either a bare URL string or `{ id?, url, appendChargeBoxId? }`. */
@@ -322,6 +319,11 @@ export class RouteStore {
     this.path = path;
     this.table = table;
     this.options = options;
+  }
+
+  /** Whether every backend of every table this store holds has an `id`. */
+  get requiresBackendIds(): boolean {
+    return this.options.requireBackendIds === true;
   }
 
   /** Load and validate the routes file (fail-fast on error); reloads apply the same options. */

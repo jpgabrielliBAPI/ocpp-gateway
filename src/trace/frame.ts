@@ -1,7 +1,8 @@
 import { OCPP_MSG_CALL, OCPP_MSG_CALLERROR, OCPP_MSG_CALLRESULT } from "../types";
+import { isPlainObject } from "../utils/objects";
 
 /** An OCPP-J frame decomposed into the fields of an Open OCPP Trace record. */
-export type ParsedFrame =
+type ParsedFrame =
   | { messageType: "CALL"; messageId: string; action: string; payload: unknown }
   | { messageType: "CALLRESULT"; messageId: string; payload: unknown }
   | {
@@ -23,9 +24,7 @@ export type UnparsedReason =
   | "invalid-arity"
   | "invalid-error";
 
-export type FrameParseResult =
-  | { ok: true; frame: ParsedFrame }
-  | { ok: false; reason: UnparsedReason };
+type FrameParseResult = { ok: true; frame: ParsedFrame } | { ok: false; reason: UnparsedReason };
 
 const fail = (reason: UnparsedReason): FrameParseResult => ({ ok: false, reason });
 
@@ -69,7 +68,7 @@ export function parseOcppFrame(raw: string): FrameParseResult {
 
 /** The payload's top-level `connectorId`, when it is a non-negative integer. */
 export function connectorIdOf(payload: unknown): number | undefined {
-  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) return undefined;
-  const value = (payload as Record<string, unknown>).connectorId;
+  if (!isPlainObject(payload)) return undefined;
+  const value = payload.connectorId;
   return Number.isInteger(value) && (value as number) >= 0 ? (value as number) : undefined;
 }

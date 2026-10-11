@@ -6,6 +6,7 @@ import {
   parseBoolean,
   parseEnv,
   parseIntegerInRange,
+  parseOptionalIntegerInRange,
   parseOptionalHeaderName,
   parseOptionalPositiveInteger,
   parseStringUnion,
@@ -25,9 +26,9 @@ const MAX_MESSAGE_BYTES_UPPER_BOUND = 2 ** 31 - 1;
  */
 const TRACE_MAX_MESSAGE_BYTES = 15 * 1024 * 1024;
 
-export const DEFAULT_TRACE_DATABASE = "ocpp_gateway";
-export const DEFAULT_TRACE_RETENTION_DAYS = 30;
-export const DEFAULT_TRACE_QUEUE_MAX = 10_000;
+const DEFAULT_TRACE_DATABASE = "ocpp_gateway";
+const DEFAULT_TRACE_RETENTION_DAYS = 30;
+const DEFAULT_TRACE_QUEUE_MAX = 10_000;
 
 /** MongoDB trace archiving settings; see README "Trace archiving". */
 export interface TraceConfig {
@@ -101,14 +102,15 @@ function parseDatabaseName(value: string | undefined): string {
 function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
   if (!parseEnv("TRACE_ENABLED", (value) => parseBoolean(value, false))) return undefined;
 
-  const integer = (fallback: number, max: number) => (value: string | undefined) =>
-    value === undefined || value.trim() === "" ? fallback : parseIntegerInRange(value, 1, max);
-
   const config: TraceConfig = {
     mongodbUri: parseEnv("TRACE_MONGODB_URI", parseMongodbUri),
     database: parseEnv("TRACE_MONGODB_DATABASE", parseDatabaseName),
-    retentionDays: parseEnv("TRACE_RETENTION_DAYS", integer(DEFAULT_TRACE_RETENTION_DAYS, 36_500)),
-    queueMax: parseEnv("TRACE_QUEUE_MAX", integer(DEFAULT_TRACE_QUEUE_MAX, 1_000_000)),
+    retentionDays: parseEnv("TRACE_RETENTION_DAYS", (value) =>
+      parseOptionalIntegerInRange(value, DEFAULT_TRACE_RETENTION_DAYS, 1, 36_500),
+    ),
+    queueMax: parseEnv("TRACE_QUEUE_MAX", (value) =>
+      parseOptionalIntegerInRange(value, DEFAULT_TRACE_QUEUE_MAX, 1, 1_000_000),
+    ),
   };
   if (maxMessageBytes > TRACE_MAX_MESSAGE_BYTES) {
     throw new Error(
@@ -135,9 +137,7 @@ export function loadConfig(): Config {
   const tenantBaseDomain = parseEnv("TENANT_BASE_DOMAIN", parseOptionalHostname);
   const tenantHostHeader = parseEnv("TENANT_HOST_HEADER", parseOptionalHeaderName);
   const maxMessageBytes = parseEnv("MAX_MESSAGE_BYTES", (value) =>
-    value === undefined || value.trim() === ""
-      ? DEFAULT_MAX_MESSAGE_BYTES
-      : parseIntegerInRange(value, 1, MAX_MESSAGE_BYTES_UPPER_BOUND),
+    parseOptionalIntegerInRange(value, DEFAULT_MAX_MESSAGE_BYTES, 1, MAX_MESSAGE_BYTES_UPPER_BOUND),
   );
 
   return {

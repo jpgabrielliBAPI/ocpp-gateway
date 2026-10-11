@@ -1,6 +1,7 @@
 import {
   type AnyBulkWriteOperation,
   BSON,
+  type Collection,
   type IndexDescription,
   MongoBulkWriteError,
   MongoClient,
@@ -8,6 +9,7 @@ import {
 } from "mongodb";
 import type { TraceConfig } from "../config";
 import { createLogger } from "../logger";
+import { errorMessage } from "../utils/errors";
 import { maskUserinfo } from "../utils/url";
 import {
   DELIVERY_STATUS_RANK,
@@ -16,6 +18,7 @@ import {
   type OcppTraceRecord,
   type TraceDocument,
   type UnparsedFrame,
+  unparsedFrame,
 } from "./record";
 import type { DeliveryUpdate, TraceStore } from "./writer";
 
@@ -27,7 +30,7 @@ export const TRACE_COLLECTION = "ocpp_traces";
  * MongoDB's document limit (16 MiB), minus headroom for the envelope and
  * the delivery updates applied later.
  */
-export const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024 - 64 * 1024;
+const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024 - 64 * 1024;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_KEY = 11000;
@@ -40,7 +43,7 @@ const INDEX_RETRY_MS = 30_000;
  * - charger history over time, and one session in reception order (also
  *   narrowing a `messageId` lookup to that session's few documents).
  */
-export const TRACE_INDEXES: IndexDescription[] = [
+const TRACE_INDEXES: IndexDescription[] = [
   { key: { expiresAt: 1 }, name: "expiresAt_ttl", expireAfterSeconds: 0 },
   { key: { tenantId: 1, chargePointId: 1, receivedAt: 1 }, name: "tenant_chargePoint_receivedAt" },
   { key: { tenantId: 1, sessionId: 1, seq: 1 }, name: "tenant_session_seq" },
@@ -79,9 +82,9 @@ export function toMongoDocument(doc: TraceDocument, retentionDays: number): Mong
 
 /**
  * Why `doc` cannot be stored as is, if it cannot: over `limit` once encoded,
- * or not encodable at all (BSON refuses keys holding a NUL byte, which JSON
- * allows). Encodes the document once: it runs in the background writer, and
- * one bad document must never fail the batch it travels with.
+ * or not encodable at all, so that one bad document never fails the batch it
+ * travels with. BSON refuses keys holding a NUL byte, which JSON can only
+ * spell as `\u0000`: only then is the document test-encoded.
  */
 function unstorableReason(
   doc: MongoTraceDocument,
@@ -91,6 +94,7 @@ function unstorableReason(
   if (BSON.calculateObjectSize(doc as unknown as BSON.Document, options) > limit) {
     return "document-too-large";
   }
+  if (!(doc.trace ?? doc.frame)!.raw.includes("\\u0000")) return null;
   try {
     BSON.serialize(doc as unknown as BSON.Document, options);
     return null;
@@ -114,17 +118,11 @@ export function fitDocumentLimit(
   if (!doc.trace) return null;
 
   const { trace, ...envelope } = doc;
-  const { timestamp, ocppVersion, chargePointId, direction, raw, meta } = trace;
-  const frame: UnparsedFrame = {
-    timestamp,
-    ...(ocppVersion !== undefined && { ocppVersion }),
-    chargePointId,
-    direction,
-    raw,
-    reason,
-    meta,
+  const fallback: MongoTraceDocument = {
+    ...envelope,
+    kind: "frame",
+    frame: unparsedFrame(trace, reason),
   };
-  const fallback: MongoTraceDocument = { ...envelope, kind: "frame", frame };
   return unstorableReason(fallback, limit) === null ? fallback : null;
 }
 
@@ -147,15 +145,26 @@ export function defaultClientOptions(uri: string): MongoClientOptions {
   );
 }
 
-/** The statuses a delivery may still move forward from to reach `status`. */
-function earlierStatuses(status: DeliveryStatus): DeliveryStatus[] {
-  return (Object.keys(DELIVERY_STATUS_RANK) as DeliveryStatus[]).filter(
-    (s) => DELIVERY_STATUS_RANK[s] < DELIVERY_STATUS_RANK[status],
-  );
+const STATUSES = Object.keys(DELIVERY_STATUS_RANK) as DeliveryStatus[];
+/** The statuses a delivery may still move forward from, to reach each status. */
+const EARLIER_STATUSES = Object.fromEntries(
+  STATUSES.map((status) => [
+    status,
+    STATUSES.filter((s) => DELIVERY_STATUS_RANK[s] < DELIVERY_STATUS_RANK[status]),
+  ]),
+) as Record<DeliveryStatus, DeliveryStatus[]>;
+
+/** A driver error, rethrown without the credentials its message may quote. */
+function masked(err: unknown): Error {
+  return new Error(maskUserinfo(errorMessage(err)));
 }
 
-/** {@link TraceStore} on a MongoDB collection. Connects lazily; never logs the URI. */
+/**
+ * {@link TraceStore} on a MongoDB collection. Connects lazily; never logs the
+ * URI, and masks credentials in every error it throws.
+ */
 export class MongoTraceStore implements TraceStore {
+  private readonly collection: Collection<MongoTraceDocument>;
   private indexesReady = false;
   private lastIndexAttempt = Number.NEGATIVE_INFINITY;
 
@@ -163,29 +172,36 @@ export class MongoTraceStore implements TraceStore {
     config: Pick<TraceConfig, "mongodbUri" | "database" | "retentionDays">,
     options: MongoClientOptions = {},
   ): MongoTraceStore {
-    // Parses the URI synchronously (throws when invalid); connects on first use.
-    const client = new MongoClient(config.mongodbUri, {
-      ...defaultClientOptions(config.mongodbUri),
-      ...options,
-    });
+    let client: MongoClient;
+    try {
+      // Parses the URI synchronously (throws when invalid); connects on first use.
+      client = new MongoClient(config.mongodbUri, {
+        ...defaultClientOptions(config.mongodbUri),
+        ...options,
+      });
+    } catch (err) {
+      throw masked(err);
+    }
     return new MongoTraceStore(client, config.database, config.retentionDays);
   }
 
   constructor(
     private readonly client: MongoClient,
-    private readonly database: string,
+    database: string,
     private readonly retentionDays: number,
-    private readonly collectionName = TRACE_COLLECTION,
-  ) {}
-
-  private collection() {
-    return this.client
-      .db(this.database, { ignoreUndefined: true })
-      .collection<MongoTraceDocument>(this.collectionName);
+    collectionName = TRACE_COLLECTION,
+  ) {
+    this.collection = client
+      .db(database, { ignoreUndefined: true })
+      .collection<MongoTraceDocument>(collectionName);
   }
 
   async ensureIndexes(): Promise<void> {
-    await this.collection().createIndexes(TRACE_INDEXES);
+    try {
+      await this.collection.createIndexes(TRACE_INDEXES);
+    } catch (err) {
+      throw masked(err);
+    }
     this.indexesReady = true;
   }
 
@@ -203,14 +219,16 @@ export class MongoTraceStore implements TraceStore {
 
     try {
       // Unordered: one refused document does not stop the others.
-      await this.collection().insertMany(mongoDocs, { ordered: false });
+      await this.collection.insertMany(mongoDocs, { ordered: false });
     } catch (err) {
       // Per-document errors are final (a duplicate key means already stored,
       // by an earlier attempt); anything else, or a write concern error, is
       // transient and the whole batch is retried.
-      if (!(err instanceof MongoBulkWriteError) || err.result.getWriteConcernError()) throw err;
+      if (!(err instanceof MongoBulkWriteError) || err.result.getWriteConcernError()) {
+        throw masked(err);
+      }
       const writeErrors = [err.writeErrors].flat();
-      if (writeErrors.length === 0) throw err;
+      if (writeErrors.length === 0) throw masked(err);
       for (const writeError of writeErrors) {
         if (writeError.code === DUPLICATE_KEY) continue;
         rejected.push({ id: mongoDocs[writeError.index]._id, reason: `code ${writeError.code}` });
@@ -226,17 +244,26 @@ export class MongoTraceStore implements TraceStore {
           // Only from an earlier status: idempotent, and never backwards.
           filter: {
             _id: id,
-            [`deliveries.${index}.status`]: { $in: earlierStatuses(delivery.status) },
+            [`deliveries.${index}.status`]: { $in: EARLIER_STATUSES[delivery.status] },
           },
           update: { $set: { [`deliveries.${index}`]: delivery } },
         },
       }),
     );
-    if (operations.length > 0) await this.collection().bulkWrite(operations, { ordered: false });
+    if (operations.length === 0) return;
+    try {
+      await this.collection.bulkWrite(operations, { ordered: false });
+    } catch (err) {
+      throw masked(err);
+    }
   }
 
   async close(): Promise<void> {
-    await this.client.close();
+    try {
+      await this.client.close();
+    } catch (err) {
+      throw masked(err);
+    }
   }
 
   /** Indexes are created before the first write, retried while they fail; never blocking writes. */
@@ -246,9 +273,7 @@ export class MongoTraceStore implements TraceStore {
     try {
       await this.ensureIndexes();
     } catch (err) {
-      log.error("trace index creation failed", {
-        error: maskUserinfo(err instanceof Error ? err.message : String(err)),
-      });
+      log.error("trace index creation failed", { error: errorMessage(err) });
     }
   }
 }

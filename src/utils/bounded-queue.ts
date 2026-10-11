@@ -2,9 +2,9 @@
  * A FIFO of messages bounded both by count and by total UTF-8 size; the oldest
  * messages are dropped first to make room. The incoming message is always kept,
  * even alone above `maxBytes`, so a message is never dropped on its own.
- * A message is its raw text, or an object carrying it as `raw`.
+ * Messages carry their text as `raw`, which sets their size.
  */
-export class BoundedQueue<T extends string | { raw: string } = string> {
+export class BoundedQueue<T extends { raw: string }> {
   private messages: T[] = [];
   /** `Buffer.byteLength` of each message, measured once on push. */
   private sizes: number[] = [];
@@ -26,7 +26,7 @@ export class BoundedQueue<T extends string | { raw: string } = string> {
 
   /** Append `message`, dropping the oldest messages to fit; returns the dropped ones. */
   push(message: T): T[] {
-    const size = Buffer.byteLength(typeof message === "string" ? message : message.raw);
+    const size = Buffer.byteLength(message.raw);
     const dropped: T[] = [];
     while (
       this.messages.length > 0 &&

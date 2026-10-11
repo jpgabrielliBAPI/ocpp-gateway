@@ -1,6 +1,7 @@
 import type { TraceConfig } from "../config";
 import { createLogger } from "../logger";
-import { maskUserinfo } from "../utils/url";
+import { errorMessage } from "../utils/errors";
+import type { MongoTraceStore } from "./mongo-store";
 import { BufferedTraceWriter, type TraceSink } from "./writer";
 
 const log = createLogger("trace");
@@ -10,7 +11,10 @@ export const TRACE_FLUSH_TIMEOUT_MS = 3_000;
 
 export interface TraceArchive {
   sink: TraceSink;
-  /** Write what is pending (bounded by {@link TRACE_FLUSH_TIMEOUT_MS}), then disconnect. */
+  /**
+   * Write what is pending (bounded by {@link TRACE_FLUSH_TIMEOUT_MS}), then
+   * disconnect; calling it again returns the same close.
+   */
   close(): Promise<void>;
 }
 
@@ -21,30 +25,32 @@ export interface TraceArchive {
  * Throws on an invalid connection string.
  */
 export async function openTraceArchive(config: TraceConfig): Promise<TraceArchive> {
-  const { MongoTraceStore, TRACE_COLLECTION } = await import("./mongo-store");
-  let store: InstanceType<typeof MongoTraceStore>;
+  const mongo = await import("./mongo-store");
+  let store: MongoTraceStore;
   try {
-    store = MongoTraceStore.create(config);
+    store = mongo.MongoTraceStore.create(config);
   } catch (err) {
-    throw new Error(`invalid TRACE_MONGODB_URI: ${maskUserinfo((err as Error).message)}`);
+    throw new Error(`invalid TRACE_MONGODB_URI: ${errorMessage(err)}`);
   }
   const writer = new BufferedTraceWriter(store, { maxQueue: config.queueMax });
   log.info("trace archiving enabled", {
     database: config.database,
-    collection: TRACE_COLLECTION,
+    collection: mongo.TRACE_COLLECTION,
     retentionDays: config.retentionDays,
     queueMax: config.queueMax,
   });
 
+  let closing: Promise<void> | undefined;
   return {
     sink: writer,
-    close: async () => {
-      await writer.close(TRACE_FLUSH_TIMEOUT_MS);
-      await store.close().catch((err: unknown) => {
-        log.warn("trace store close failed", {
-          error: maskUserinfo(err instanceof Error ? err.message : String(err)),
+    close: () => {
+      closing ??= (async () => {
+        await writer.close(TRACE_FLUSH_TIMEOUT_MS);
+        await store.close().catch((err: unknown) => {
+          log.warn("trace store close failed", { error: errorMessage(err) });
         });
-      });
+      })();
+      return closing;
     },
   };
 }

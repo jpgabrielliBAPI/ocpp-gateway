@@ -1,14 +1,14 @@
 import type { Direction } from "./record";
 
 /** Unanswered CALLs remembered per session, across all its conversations. */
-export const DEFAULT_MAX_PENDING_CALLS = 1000;
+const DEFAULT_MAX_PENDING_CALLS = 1000;
 /**
  * Characters those CALLs may hold (ids and actions): a hostile charger could
  * otherwise pin `DEFAULT_MAX_PENDING_CALLS` maximum-size message ids in memory.
  */
-export const DEFAULT_MAX_PENDING_CHARS = 256 * 1024;
+const DEFAULT_MAX_PENDING_CHARS = 256 * 1024;
 
-export interface CallRef {
+interface CallRef {
   traceId: string;
   action: string;
 }

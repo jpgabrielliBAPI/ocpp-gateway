@@ -1,12 +1,16 @@
 /**
  * Test-only port of the Open OCPP Trace reference consumer
  * (`conformance/validate.mjs` of open-ocpp-trace/specification, Apache-2.0):
- * schema validation, raw-frame fidelity, and the normative correlation rule.
+ * schema validation, raw-frame fidelity, and the normative correlation rule;
+ * plus the gateway's conversation views checked against it.
  */
 import { readFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import Ajv2020 from "ajv/dist/2020.js";
 import addFormats from "ajv-formats";
+import { expect } from "vitest";
+import type { OcppTraceRecord, TraceDocument } from "../../src/trace/record";
 
 export const SPEC_DIR = join(__dirname, "..", "fixtures", "open-ocpp-trace");
 
@@ -38,20 +42,6 @@ export function schemaErrors(record: unknown): string[] {
 
 const MESSAGE_TYPE: Record<number, string> = { 2: "CALL", 3: "CALLRESULT", 4: "CALLERROR" };
 
-function deepEqual(a: unknown, b: unknown): boolean {
-  if (Object.is(a, b)) return true;
-  if (typeof a !== "object" || typeof b !== "object" || a === null || b === null) return false;
-  if (Array.isArray(a) !== Array.isArray(b)) return false;
-  const keysA = Object.keys(a);
-  const keysB = Object.keys(b);
-  if (keysA.length !== keysB.length) return false;
-  return keysA.every(
-    (k) =>
-      Object.hasOwn(b, k) &&
-      deepEqual((a as Record<string, unknown>)[k], (b as Record<string, unknown>)[k]),
-  );
-}
-
 /** Raw-fidelity violations of `record`, empty when `raw` decodes to the record. */
 export function rawFidelityErrors(record: SpecRecord): string[] {
   if (record.raw === undefined) return [];
@@ -67,17 +57,17 @@ export function rawFidelityErrors(record: SpecRecord): string[] {
   if (record.messageId !== undefined && frame[1] !== record.messageId) errors.push("messageId");
   if (record.messageType === "CALL") {
     if (frame[2] !== record.action) errors.push("action");
-    if (record.payload !== undefined && !deepEqual(frame[3], record.payload))
+    if (record.payload !== undefined && !isDeepStrictEqual(frame[3], record.payload))
       errors.push("payload");
   } else if (record.messageType === "CALLRESULT") {
-    if (record.payload !== undefined && !deepEqual(frame[2], record.payload))
+    if (record.payload !== undefined && !isDeepStrictEqual(frame[2], record.payload))
       errors.push("payload");
   } else if (record.messageType === "CALLERROR") {
     if (record.error?.code !== undefined && frame[2] !== record.error.code) errors.push("code");
     if (record.error?.description !== undefined && frame[3] !== record.error.description) {
       errors.push("description");
     }
-    if (record.error?.details !== undefined && !deepEqual(frame[4], record.error.details)) {
+    if (record.error?.details !== undefined && !isDeepStrictEqual(frame[4], record.error.details)) {
       errors.push("details");
     }
   }
@@ -176,4 +166,53 @@ export function loadFixtures(): Fixture[] {
         .map((line) => JSON.parse(line) as SpecRecord),
       expected: JSON.parse(readFileSync(join(dir, name, "expected.json"), "utf8")) as ConsumerView,
     }));
+}
+
+/**
+ * The conversation a record belongs to: its CSMS source, or the primary for a
+ * charger frame (the one the charger talks with; mirrored copies are observed
+ * by secondaries, never answered to by the charger).
+ */
+function homeConversation({ meta: { gateway } }: OcppTraceRecord) {
+  return gateway.source.type === "csms"
+    ? gateway.source.id
+    : gateway.destinations.find((d) => d.role === "primary")?.target;
+}
+
+/** The records exchanged between the charger and the CSMS `backendId`, in reception order. */
+function conversationView(docs: TraceDocument[], backendId: string): OcppTraceRecord[] {
+  return docs
+    .flatMap((d) => (d.kind === "trace" ? [d.trace] : []))
+    .filter(({ meta: { gateway } }) =>
+      gateway.source.type === "csms"
+        ? gateway.source.id === backendId
+        : gateway.destinations.some((d) => d.target === backendId),
+    )
+    .sort((a, b) => a.meta.gateway.seq - b.meta.gateway.seq);
+}
+
+/**
+ * Every record conforms to the spec, and within each conversation the
+ * gateway's correlation is the reference consumer's, for the records that
+ * conversation is the home of.
+ */
+export function expectConforming(docs: TraceDocument[], backendIds: string[]): void {
+  for (const doc of docs) {
+    if (doc.kind !== "trace") continue;
+    expect(schemaErrors(doc.trace)).toEqual([]);
+    expect(rawFidelityErrors(doc.trace as unknown as SpecRecord)).toEqual([]);
+  }
+  for (const backendId of backendIds) {
+    const view = conversationView(docs, backendId);
+    const consumer = buildConsumerView(view as unknown as SpecRecord[]);
+    view.forEach((record, i) => {
+      if (homeConversation(record) !== backendId) return;
+      const expected = consumer.records[i].correlatesWith;
+      const ours = record.meta.gateway.correlation;
+      expect(ours?.callTraceId).toBe(
+        expected === undefined ? undefined : view[expected].meta.gateway.traceId,
+      );
+      if (ours) expect(ours.action).toBe(consumer.records[i].action);
+    });
+  }
 }

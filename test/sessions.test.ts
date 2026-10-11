@@ -140,9 +140,10 @@ describe("SessionRegistry.teardownAll", () => {
       open(registry, key("CP-1", "acme"), "a").session,
     ];
 
-    expect(registry.teardownAll()).toBe(4);
+    registry.teardownAll();
     expect(sessions.every((session) => session.tornDown)).toBe(true);
-    expect(registry.teardownAll()).toBe(0);
+    // Each session left the registry as it ended.
+    expect(registry.evict(key("CP-1"), "a")).toEqual({ replaced: 0, kept: 0 });
   });
 });
 

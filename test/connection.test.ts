@@ -575,7 +575,7 @@ describe("ChargerConnection trace capture", () => {
     // ws still delivers messages that were in flight while the charger closes.
     mirrors[0].readyState = WebSocket.CLOSING;
     send(CALL("late"));
-    expect(statuses(0)).toEqual([["dropped", "link-not-open"]]);
+    expect(statuses(0)).toEqual([["dropped", "session-ended"]]);
     expect(statuses(1)).toEqual([["dropped", "session-ended"]]);
   });
 
@@ -599,6 +599,26 @@ describe("ChargerConnection trace capture", () => {
     // before that frame was decoded.
     expect(parsedAtSend).toEqual([0, 0, 1]);
     expect(parse).toHaveBeenCalledTimes(2);
+  });
+
+  it("tells binary frames that are not UTF-8 from those that are, by their bytes", () => {
+    const { sink, charger, primary } = startTracedSession(0);
+    primary.emit("open");
+    const frame = (...bytes: (string | number)[]) =>
+      Buffer.concat(bytes.map((b) => (typeof b === "string" ? Buffer.from(b) : Buffer.from([b]))));
+    // A genuine U+FFFD (EF BF BD) is valid UTF-8; a lone 0xFF is not.
+    charger.emit(
+      "message",
+      frame('[2,"m1","DataTransfer",{"data":"', 0xef, 0xbf, 0xbd, '"}]'),
+      true,
+    );
+    charger.emit("message", frame('[2,"m2","DataTransfer",{"data":"', 0xff, '"}]'), true);
+    expect(
+      sink.docs.map((doc) => [doc.kind, doc.kind === "frame" ? doc.frame.reason : "-"]),
+    ).toEqual([
+      ["trace", "-"],
+      ["frame", "lossy-binary"],
+    ]);
   });
 
   it("records a frame dropped because the primary link is gone", () => {
