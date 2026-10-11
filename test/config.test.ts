@@ -11,6 +11,11 @@ describe("loadConfig", () => {
     "TENANT_BASE_DOMAIN",
     "TENANT_HOST_HEADER",
     "MAX_MESSAGE_BYTES",
+    "TRACE_ENABLED",
+    "TRACE_MONGODB_URI",
+    "TRACE_MONGODB_DATABASE",
+    "TRACE_RETENTION_DAYS",
+    "TRACE_QUEUE_MAX",
   ] as const;
 
   beforeEach(() => {
@@ -34,6 +39,7 @@ describe("loadConfig", () => {
     expect(config.tenantBaseDomain).toBeUndefined();
     expect(config.tenantHostHeader).toBeUndefined();
     expect(config.maxMessageBytes).toBe(1024 * 1024);
+    expect(config.trace).toBeUndefined();
   });
 
   it("reads MAX_MESSAGE_BYTES", () => {
@@ -201,5 +207,92 @@ describe("loadConfig", () => {
     expect(config.loggerConfig.logLevel).toBe("warn");
     expect(config.loggerConfig.debugMessageMaxLength).toBe(77);
     expect(config.port).toBe(9001);
+  });
+
+  describe("trace archiving", () => {
+    const enable = () => {
+      vi.stubEnv("TRACE_ENABLED", "true");
+      vi.stubEnv("TRACE_MONGODB_URI", "mongodb://user:s3cret@mongo.example.com:27017/?tls=true");
+    };
+
+    it("is disabled by default, whatever the other TRACE_ settings", () => {
+      vi.stubEnv("TRACE_MONGODB_URI", "not a uri");
+      vi.stubEnv("TRACE_RETENTION_DAYS", "-1");
+
+      expect(loadConfig().trace).toBeUndefined();
+    });
+
+    it("applies defaults once enabled", () => {
+      enable();
+
+      expect(loadConfig().trace).toEqual({
+        mongodbUri: "mongodb://user:s3cret@mongo.example.com:27017/?tls=true",
+        database: "ocpp_gateway",
+        retentionDays: 30,
+        queueMax: 10_000,
+      });
+    });
+
+    it("reads every setting", () => {
+      enable();
+      vi.stubEnv("TRACE_MONGODB_URI", " mongodb+srv://cluster.example.com ");
+      vi.stubEnv("TRACE_MONGODB_DATABASE", "traces");
+      vi.stubEnv("TRACE_RETENTION_DAYS", "7");
+      vi.stubEnv("TRACE_QUEUE_MAX", "500");
+
+      expect(loadConfig().trace).toEqual({
+        mongodbUri: "mongodb+srv://cluster.example.com",
+        database: "traces",
+        retentionDays: 7,
+        queueMax: 500,
+      });
+    });
+
+    it("requires TRACE_MONGODB_URI", () => {
+      vi.stubEnv("TRACE_ENABLED", "true");
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid value for environment variable TRACE_MONGODB_URI: required when TRACE_ENABLED is true",
+      );
+    });
+
+    it("rejects a non-MongoDB URI without echoing it", () => {
+      enable();
+      vi.stubEnv("TRACE_MONGODB_URI", "https://user:s3cret@mongo.example.com");
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid value for environment variable TRACE_MONGODB_URI: must start with mongodb:// or mongodb+srv://",
+      );
+      expect(() => loadConfig()).not.toThrow(/s3cret/);
+    });
+
+    it.each([
+      { envName: "TRACE_ENABLED", value: "yes", expectedCause: /Invalid boolean value/ },
+      { envName: "TRACE_MONGODB_DATABASE", value: "a/b", expectedCause: /Invalid database name/ },
+      { envName: "TRACE_MONGODB_DATABASE", value: "a.b", expectedCause: /Invalid database name/ },
+      {
+        envName: "TRACE_MONGODB_DATABASE",
+        value: "x".repeat(64),
+        expectedCause: /Invalid database name/,
+      },
+      { envName: "TRACE_RETENTION_DAYS", value: "0", expectedCause: /between 1 and 36500/ },
+      { envName: "TRACE_RETENTION_DAYS", value: "1.5", expectedCause: /Invalid integer/ },
+      { envName: "TRACE_QUEUE_MAX", value: "0", expectedCause: /between 1 and 1000000/ },
+    ])("rejects invalid $envName value $value", ({ envName, value, expectedCause }) => {
+      enable();
+      vi.stubEnv(envName, value);
+
+      expect(() => loadConfig()).toThrow(`Invalid value for environment variable ${envName}`);
+      expect(() => loadConfig()).toThrow(expectedCause);
+    });
+
+    it("refuses MAX_MESSAGE_BYTES above what a MongoDB document can hold", () => {
+      enable();
+      vi.stubEnv("MAX_MESSAGE_BYTES", String(15 * 1024 * 1024 + 1));
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid value for environment variable MAX_MESSAGE_BYTES: must not exceed 15728640 when TRACE_ENABLED is true",
+      );
+    });
   });
 });
