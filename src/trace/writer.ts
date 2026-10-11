@@ -73,13 +73,24 @@ interface Entry {
   bytes: number;
 }
 
+/** Bytes per character of raw text: the UTF-16 string, plus its parsed values. */
+const BYTES_PER_CHAR = 8;
+/** Heap cost of one parsed object or array (a hostile frame may hold many empty ones). */
+const BYTES_PER_CONTAINER = 64;
+const DOCUMENT_OVERHEAD_BYTES = 1024;
+
 /**
- * Memory a document holds until written: the raw frame (UTF-16), its parsed
- * payload, and a fixed overhead for the envelope.
+ * Upper estimate of the memory a document holds until written: the raw frame,
+ * its parsed payload (every `{` or `[` may become an object), the envelope.
  */
 function estimateBytes(doc: TraceDocument): number {
   const raw = doc.kind === "trace" ? doc.trace.raw : doc.frame.raw;
-  return raw.length * 4 + 1024;
+  let containers = 0;
+  for (let i = 0; i < raw.length; i++) {
+    const c = raw.charCodeAt(i);
+    if (c === 0x7b || c === 0x5b) containers++;
+  }
+  return raw.length * BYTES_PER_CHAR + containers * BYTES_PER_CONTAINER + DOCUMENT_OVERHEAD_BYTES;
 }
 
 /**

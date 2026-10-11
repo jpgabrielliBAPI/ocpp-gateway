@@ -268,11 +268,22 @@ describe("BufferedTraceWriter", () => {
     });
 
     it("refuses new documents beyond the queue bytes", () => {
-      const { writer } = setup({ maxQueueBytes: 10_000 });
+      const { writer } = setup({ maxQueueBytes: 30_000 });
       expect(writer.insert(makeDoc("a", "x".repeat(2_000)))).toBe(true);
       expect(writer.insert(makeDoc("b", "x".repeat(2_000)))).toBe(false);
       expect(writer.stats().queuedBytes).toBeGreaterThan(2_000);
-      expect(writer.stats().queuedBytes).toBeLessThanOrEqual(10_000);
+      expect(writer.stats().queuedBytes).toBeLessThanOrEqual(30_000);
+    });
+
+    it("counts the memory a parsed payload takes, not only the raw text", () => {
+      const raw = (body: string) => `[2,"m1","DataTransfer",${body}]`;
+      const flat = raw(`"${"x".repeat(3_000)}"`);
+      const nested = raw(`[${Array(1_000).fill("{}").join(",")}]`);
+      const { writer } = setup({ maxQueueBytes: 50_000 });
+      expect(writer.insert(makeDoc("flat", flat))).toBe(true);
+      // Same text length, but a thousand objects once parsed.
+      expect(nested.length).toBeLessThan(flat.length);
+      expect(writer.insert(makeDoc("nested", nested))).toBe(false);
     });
 
     it("frees the room once written", async () => {
