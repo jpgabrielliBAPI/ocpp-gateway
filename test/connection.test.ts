@@ -559,6 +559,18 @@ describe("ChargerConnection trace capture", () => {
     expect(statuses(1)).toEqual([["dropped", "session-ended"]]);
   });
 
+  it("records frames the charger sends after the session ended as dropped, never queued", () => {
+    const { primary, mirrors, send, statuses, connection } = startTracedSession();
+    primary.emit("open");
+    mirrors[0].emit("open");
+    connection.teardown();
+    // ws still delivers messages that were in flight while the charger closes.
+    mirrors[0].readyState = WebSocket.CLOSING;
+    send(CALL("late"));
+    expect(statuses(0)).toEqual([["dropped", "link-not-open"]]);
+    expect(statuses(1)).toEqual([["dropped", "session-ended"]]);
+  });
+
   it("records a frame dropped because the primary link is gone", () => {
     const { primary, send, statuses } = startTracedSession(0);
     primary.readyState = WebSocket.CLOSING;

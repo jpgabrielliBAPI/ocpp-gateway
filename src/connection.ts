@@ -338,6 +338,11 @@ export class ChargerConnection {
     message: QueuedMessage,
     fields: Record<string, unknown> = {},
   ) {
+    // A frame still arriving while the charger closes: nothing will flush it.
+    if (!this.alive) {
+      message.delivery?.dropped("session-ended");
+      return;
+    }
     message.delivery?.queued();
     const dropped = queue.push(message);
     for (const old of dropped) old.delivery?.dropped("queue-overflow");
