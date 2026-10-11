@@ -15,7 +15,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stored once as an [Open OCPP Trace](https://github.com/open-ocpp-trace/specification)
   v1.1 record, with its tenant, gateway session, source, each destination's
   delivery outcome (queued, submitted, written, failed, dropped) and the CALL
-  it answers. Traces expire through a MongoDB TTL index. Archiving never
+  it answers. Traces expire through a MongoDB TTL index; nothing is written
+  while that index cannot be created. Archiving never
   delays forwarding: writes are batched in the background, bounded in memory,
   and dropped (counted and logged) when MongoDB is unavailable. Disabled by
   default; the MongoDB driver is not even loaded then.
