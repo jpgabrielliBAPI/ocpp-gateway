@@ -87,6 +87,14 @@ describe("fitDocumentLimit", () => {
     expect(fitted._id).toBe(mongo._id);
   });
 
+  it("stores a record BSON cannot encode (NUL in a key) as its raw frame", () => {
+    const raw = '[2,"m1","DataTransfer",{"vendorId":"V","data":{"a\\u0000b":1}}]';
+    const mongo = toMongoDocument(traceDocs(["charger", raw])[0], 30);
+    const fitted = fitDocumentLimit(mongo)!;
+    expect(fitted.kind).toBe("frame");
+    expect(fitted.frame).toMatchObject({ raw, reason: "not-storable" });
+  });
+
   it("gives up when even the raw frame does not fit", () => {
     const raw = `[2,"m1","DataTransfer",{"data":"${"x".repeat(10_000)}"}]`;
     const mongo = toMongoDocument(traceDocs(["charger", raw])[0], 30);
@@ -202,6 +210,14 @@ describe.skipIf(!MONGODB_URI)("MongoTraceStore against MongoDB", { timeout: 30_0
     expect(stored?.kind).toBe("frame");
     expect(stored?.frame?.reason).toBe("document-too-large");
     expect(stored?.frame?.raw).toBe(raw);
+  });
+
+  it("stores a batch holding a record BSON cannot encode, without failing the others", async () => {
+    const [good] = traceDocs(["charger", BOOT]);
+    const [bad] = traceDocs(["charger", '[2,"m1","DataTransfer",{"data":{"a\\u0000b":1}}]']);
+    await expect(store.insertMany([bad, good])).resolves.toEqual({ rejected: [] });
+    expect((await collection().findOne({ _id: bad.id }))?.frame?.reason).toBe("not-storable");
+    expect((await collection().findOne({ _id: good.id }))?.kind).toBe("trace");
   });
 
   it("reports the documents the server refuses, and stores the others", async () => {

@@ -77,7 +77,8 @@ export interface UnparsedFrame {
   chargePointId: string;
   direction: Direction;
   raw: string;
-  reason: UnparsedReason | "document-too-large";
+  /** Also set by the store for records it cannot hold (too large, or not BSON-encodable). */
+  reason: UnparsedReason | "document-too-large" | "not-storable";
   meta: { gateway: GatewayMeta };
 }
 

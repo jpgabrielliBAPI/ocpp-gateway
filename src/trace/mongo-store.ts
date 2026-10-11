@@ -77,20 +77,40 @@ export function toMongoDocument(doc: TraceDocument, retentionDays: number): Mong
   };
 }
 
-const bsonSize = (doc: MongoTraceDocument) =>
-  BSON.calculateObjectSize(doc as unknown as BSON.Document, { ignoreUndefined: true });
+/**
+ * Why `doc` cannot be stored as is, if it cannot: over `limit` once encoded,
+ * or not encodable at all (BSON refuses keys holding a NUL byte, which JSON
+ * allows). Encodes the document once: it runs in the background writer, and
+ * one bad document must never fail the batch it travels with.
+ */
+function unstorableReason(
+  doc: MongoTraceDocument,
+  limit: number,
+): "document-too-large" | "not-storable" | null {
+  const options = { ignoreUndefined: true };
+  if (BSON.calculateObjectSize(doc as unknown as BSON.Document, options) > limit) {
+    return "document-too-large";
+  }
+  try {
+    BSON.serialize(doc as unknown as BSON.Document, options);
+    return null;
+  } catch {
+    return "not-storable";
+  }
+}
 
 /**
- * A document MongoDB can store. Parsed payloads can take several times their
- * JSON size in BSON (array indexes are stored as keys), so a record over the
- * limit is stored as its raw frame alone; null when even that does not fit.
- * Never truncates.
+ * A document MongoDB can store. A record that cannot be (parsed payloads can
+ * take several times their JSON size in BSON, since array indexes are stored
+ * as keys; some JSON keys are not valid BSON) is stored as its raw frame
+ * alone; null when even that cannot be. Never truncates.
  */
 export function fitDocumentLimit(
   doc: MongoTraceDocument,
   limit = MAX_DOCUMENT_BYTES,
 ): MongoTraceDocument | null {
-  if (bsonSize(doc) <= limit) return doc;
+  const reason = unstorableReason(doc, limit);
+  if (reason === null) return doc;
   if (!doc.trace) return null;
 
   const { trace, ...envelope } = doc;
@@ -101,11 +121,11 @@ export function fitDocumentLimit(
     chargePointId,
     direction,
     raw,
-    reason: "document-too-large",
+    reason,
     meta,
   };
   const fallback: MongoTraceDocument = { ...envelope, kind: "frame", frame };
-  return bsonSize(fallback) <= limit ? fallback : null;
+  return unstorableReason(fallback, limit) === null ? fallback : null;
 }
 
 /**
@@ -177,7 +197,7 @@ export class MongoTraceStore implements TraceStore {
     for (const doc of docs) {
       const fitted = fitDocumentLimit(toMongoDocument(doc, this.retentionDays));
       if (fitted) mongoDocs.push(fitted);
-      else rejected.push({ id: doc.id, reason: "document-too-large" });
+      else rejected.push({ id: doc.id, reason: "not-storable" });
     }
     if (mongoDocs.length === 0) return { rejected };
 
