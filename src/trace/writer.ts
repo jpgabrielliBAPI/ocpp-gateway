@@ -1,4 +1,5 @@
 import { createLogger } from "../logger";
+import { maskUserinfo } from "../utils/url";
 import { DELIVERY_STATUS_RANK, type Delivery, type TraceDocument } from "./record";
 
 const log = createLogger("trace");
@@ -337,7 +338,7 @@ export class BufferedTraceWriter implements TraceSink {
         if (this.storeAvailable) {
           this.storeAvailable = false;
           log.error("trace store unavailable", {
-            error: err instanceof Error ? err.message : String(err),
+            error: maskUserinfo(err instanceof Error ? err.message : String(err)),
             ...this.queueStats(),
           });
         }

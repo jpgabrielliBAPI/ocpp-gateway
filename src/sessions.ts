@@ -69,6 +69,14 @@ export class SessionRegistry<T extends { teardown(): void }> {
     entries.set(session, authHeader);
   }
 
+  /** Tear down every live session (gateway shutdown); returns how many there were. */
+  teardownAll(): number {
+    // teardown() calls remove(): iterate over a snapshot.
+    const all = [...this.sessions.values()].flatMap((entries) => [...entries.keys()]);
+    for (const session of all) session.teardown();
+    return all.length;
+  }
+
   remove(key: SessionKey, session: T): void {
     const id = canonical(key);
     const entries = this.sessions.get(id);

@@ -14,3 +14,11 @@ export function redactUrl(value: string): string {
   if (url.hash !== "") url.hash = "***";
   return url.toString();
 }
+
+/**
+ * `text` (typically an error message) with the userinfo of any URL in it
+ * masked, for messages that may quote a connection string.
+ */
+export function maskUserinfo(text: string): string {
+  return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/gi, "$1***@");
+}

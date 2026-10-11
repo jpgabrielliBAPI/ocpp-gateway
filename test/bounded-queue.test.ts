@@ -6,8 +6,8 @@ describe("BoundedQueue", () => {
   it("keeps messages in order and tracks their total size in bytes", () => {
     const queue = new BoundedQueue(10, 100);
 
-    expect(queue.push("m-1")).toBe(0);
-    expect(queue.push("é")).toBe(0);
+    expect(queue.push("m-1")).toEqual([]);
+    expect(queue.push("é")).toEqual([]);
 
     expect(queue.length).toBe(2);
     // "é" is one character but two UTF-8 bytes.
@@ -21,7 +21,7 @@ describe("BoundedQueue", () => {
     queue.push("m-1");
     queue.push("m-2");
 
-    expect(queue.push("m-3")).toBe(1);
+    expect(queue.push("m-3")).toEqual(["m-1"]);
     expect(queue.drain()).toEqual(["m-2", "m-3"]);
   });
 
@@ -32,7 +32,7 @@ describe("BoundedQueue", () => {
     queue.push("bbb");
     queue.push("ccc");
 
-    expect(queue.push("dddddd")).toBe(2);
+    expect(queue.push("dddddd")).toEqual(["aaa", "bbb"]);
     expect(queue.bytes).toBe(9);
     expect(queue.drain()).toEqual(["ccc", "dddddd"]);
   });
@@ -42,7 +42,7 @@ describe("BoundedQueue", () => {
 
     queue.push("aa");
 
-    expect(queue.push("bbbbbb")).toBe(1);
+    expect(queue.push("bbbbbb")).toEqual(["aa"]);
     expect(queue.drain()).toEqual(["bbbbbb"]);
   });
 
@@ -59,5 +59,15 @@ describe("BoundedQueue", () => {
     expect(queue.length).toBe(0);
     expect(queue.bytes).toBe(0);
     expect(queue.drain()).toEqual([]);
+  });
+
+  it("holds messages with metadata, sized by their raw text", () => {
+    const queue = new BoundedQueue<{ raw: string; tag: number }>(10, 4);
+
+    queue.push({ raw: "aa", tag: 1 });
+
+    expect(queue.push({ raw: "bbb", tag: 2 })).toEqual([{ raw: "aa", tag: 1 }]);
+    expect(queue.bytes).toBe(3);
+    expect(queue.drain()).toEqual([{ raw: "bbb", tag: 2 }]);
   });
 });

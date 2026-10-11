@@ -130,6 +130,22 @@ describe("SessionRegistry", () => {
   });
 });
 
+describe("SessionRegistry.teardownAll", () => {
+  it("tears down every live session, across charge points and tenants", () => {
+    const registry = new SessionRegistry<FakeSession>();
+    const sessions = [
+      open(registry, key("CP-1"), "a").session,
+      open(registry, key("CP-1"), "b").session,
+      open(registry, key("CP-2"), undefined).session,
+      open(registry, key("CP-1", "acme"), "a").session,
+    ];
+
+    expect(registry.teardownAll()).toBe(4);
+    expect(sessions.every((session) => session.tornDown)).toBe(true);
+    expect(registry.teardownAll()).toBe(0);
+  });
+});
+
 describe("formatSessionKey", () => {
   it("is the bare chargeBoxId without a tenant, tenant/chargeBoxId otherwise", () => {
     expect(formatSessionKey(key("CP-001"))).toBe("CP-001");

@@ -8,6 +8,7 @@ import {
 } from "mongodb";
 import type { TraceConfig } from "../config";
 import { createLogger } from "../logger";
+import { maskUserinfo } from "../utils/url";
 import {
   DELIVERY_STATUS_RANK,
   type Delivery,
@@ -209,7 +210,7 @@ export class MongoTraceStore implements TraceStore {
       await this.ensureIndexes();
     } catch (err) {
       log.error("trace index creation failed", {
-        error: err instanceof Error ? err.message : String(err),
+        error: maskUserinfo(err instanceof Error ? err.message : String(err)),
       });
     }
   }
