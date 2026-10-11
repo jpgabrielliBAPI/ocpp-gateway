@@ -264,6 +264,22 @@ describe("SessionTracer", () => {
     expect(sink.traces()[0].meta.gateway.binary).toBe(true);
   });
 
+  it("never claims a binary frame decoded with replacement characters is verbatim", () => {
+    const { sink, tracer } = setup();
+    // What ws hands over for a binary frame holding invalid UTF-8.
+    const raw = Buffer.from([
+      ...Buffer.from('[2,"m1","DataTransfer",{"data":"'),
+      0xff,
+      ...Buffer.from('"}]'),
+    ]).toString();
+    tracer.fromCharger(raw, true).commit();
+    expect(sink.docs[0].kind === "frame" && sink.docs[0].frame).toMatchObject({
+      raw,
+      reason: "lossy-binary",
+      meta: { gateway: { binary: true } },
+    });
+  });
+
   it("stores frames the spec cannot represent as raw frames, still tracking deliveries", () => {
     const { sink, tracer } = setup();
     const frame = tracer.fromCharger('[2,42,"Heartbeat",{}]');

@@ -165,7 +165,12 @@ export class SessionTracer {
     const ocppVersion = this.ocppVersion !== undefined ? { ocppVersion: this.ocppVersion } : {};
     const base = { id, tenantId, sessionId, chargePointId, seq, receivedAt, deliveries: [] };
 
-    const parsed = parseOcppFrame(raw);
+    // ws decodes a binary frame holding invalid UTF-8 with U+FFFD: `raw` would
+    // not be the frame received, so it never becomes a trace record.
+    const parsed =
+      binary && raw.includes("\uFFFD")
+        ? ({ ok: false, reason: "lossy-binary" } as const)
+        : parseOcppFrame(raw);
     if (!parsed.ok) {
       const frame = {
         timestamp,

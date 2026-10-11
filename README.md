@@ -363,7 +363,7 @@ One document per received frame — never one per destination, and a frame repla
 | `dropped`   | Discarded by the gateway — `reason`: `queue-overflow` (oldest message evicted from a full queue), `session-ended` (still queued when the session ended), `link-not-open` (the link was closing or closed) |
 
   Statuses only move forward (`queued` → `submitted` → a final status), so a late or repeated update never overwrites a newer one. Usually a frame is written once, with its final outcome already known.
-- **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. A record too large for a MongoDB document once parsed (BSON can take several times the JSON size) is also stored this way, with `reason: "document-too-large"`: `raw` is kept whole, never truncated. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
+- **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description, a binary frame that is not valid UTF-8. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. A record too large for a MongoDB document once parsed (BSON can take several times the JSON size) is also stored this way, with `reason: "document-too-large"`: `raw` is kept whole, never truncated. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
 - **Indexes:** `{ expiresAt: 1 }` (TTL), `{ tenantId: 1, chargePointId: 1, receivedAt: 1 }` (a charger's history) and `{ tenantId: 1, sessionId: 1, seq: 1 }` (one session in order; a `messageId` lookup within a session only scans that session's documents). They are created at the first write.
 
 ### Requests, responses, primary and secondaries
@@ -392,7 +392,7 @@ Traces contain whole OCPP payloads: RFID tags (`idTag`), transaction and meter d
 ### Known limitations
 
 - `written` means written to the socket, not received by the peer.
-- Binary WebSocket frames are archived as the text the gateway forwards (decoded as UTF-8), flagged `binary: true`.
+- Binary WebSocket frames are archived as the text the gateway forwards (decoded as UTF-8), flagged `binary: true`; one that is not valid UTF-8 (decoded with replacement characters) is stored as a raw frame with `reason: "lossy-binary"`, since `raw` would not be the bytes received.
 - A CALL to the secondaries is correlated per secondary, but the gateway does not track the secondaries' own CALLs (the charger never sees them).
 - The [Cloudflare deployment](deploy/cloudflare/) does not pass `TRACE_*` variables to the gateway.
 
