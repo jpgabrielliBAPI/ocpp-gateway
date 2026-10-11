@@ -1,5 +1,14 @@
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildTargetUrl, parseRouteTable, resolveRoute } from "../src/routes";
+import {
+  RouteStore,
+  buildTargetUrl,
+  loadRouteTable,
+  parseRouteTable,
+  resolveRoute,
+} from "../src/routes";
 
 const TABLE = {
   default: {
@@ -303,4 +312,232 @@ describe("buildTargetUrl", () => {
       buildTargetUrl(backend("wss://fixed-csms.example.com/XXXXXXXX?tenant=emea", false), "CP-001"),
     ).toBe("wss://fixed-csms.example.com/XXXXXXXX?tenant=emea");
   });
+});
+
+describe("backend ids", () => {
+  const withIds = {
+    default: {
+      primary: { id: "csms-main", url: "wss://csms.example.com/ocpp" },
+      secondaries: [{ id: "mirror", url: "wss://mirror.example.com/ocpp" }],
+    },
+  };
+
+  it("keeps an explicit backend id", () => {
+    const t = parseRouteTable(withIds);
+    expect(t.default?.primary).toEqual({
+      id: "csms-main",
+      url: "wss://csms.example.com/ocpp",
+      appendChargeBoxId: true,
+    });
+    expect(t.default?.secondaries[0].id).toBe("mirror");
+  });
+
+  it("leaves the id out when none is given", () => {
+    expect(parseRouteTable(TABLE).default?.primary).not.toHaveProperty("id");
+  });
+
+  it.each([["", "has space", "a/b", "-leading-dash", "x".repeat(65), 42]].flat())(
+    "rejects the id %j",
+    (id) => {
+      expect(() =>
+        parseRouteTable({ default: { primary: { id, url: "wss://csms.example.com/ocpp" } } }),
+      ).toThrow(/route "default" primary "id"/);
+    },
+  );
+
+  it("accepts ids made of letters, digits, '.', '_' and '-'", () => {
+    const id = `A1.b_c-${"x".repeat(57)}`;
+    expect(
+      parseRouteTable({ default: { primary: { id, url: "wss://csms.example.com/ocpp" } } }).default
+        ?.primary.id,
+    ).toBe(id);
+  });
+
+  it("rejects an id used twice in the same route", () => {
+    expect(() =>
+      parseRouteTable({
+        default: {
+          primary: { id: "csms", url: "wss://a.example.com/ocpp" },
+          secondaries: [{ id: "csms", url: "wss://b.example.com/ocpp" }],
+        },
+      }),
+    ).toThrow(/backend id "csms" is used twice in route "default"/);
+  });
+
+  it("rejects an id naming two different URLs within a scope", () => {
+    expect(() =>
+      parseRouteTable({
+        default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
+        chargers: { "CP-1": { primary: { id: "csms", url: "wss://b.example.com/ocpp" } } },
+      }),
+    ).toThrow(/backend id "csms" names different servers/);
+    expect(() =>
+      parseRouteTable({
+        tenants: {
+          acme: {
+            default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
+            chargers: {
+              "CP-1": {
+                primary: { id: "other", url: "wss://c.example.com/ocpp" },
+                secondaries: [{ id: "csms", url: "wss://b.example.com/ocpp" }],
+              },
+            },
+          },
+        },
+      }),
+    ).toThrow(/backend id "csms" names different servers in tenant "acme"/);
+  });
+
+  it("does not leak backend URLs in id errors", () => {
+    expect(() =>
+      parseRouteTable({
+        default: { primary: { id: "csms", url: "wss://user:secret@a.example.com/ocpp" } },
+        chargers: { "CP-1": { primary: { id: "csms", url: "wss://b.example.com/ocpp" } } },
+      }),
+    ).toThrow(/^(?!.*secret).*$/);
+  });
+
+  it("lets one CSMS id name per-charger endpoints of the same server", () => {
+    const t = parseRouteTable({
+      default: { primary: { id: "csms", url: "wss://csms.example.com/ocpp" } },
+      chargers: {
+        "CP-1": {
+          primary: { id: "csms", url: "wss://csms.example.com/ep/AAAA", appendChargeBoxId: false },
+        },
+        "CP-2": {
+          primary: {
+            id: "csms",
+            url: "wss://user:token@csms.example.com/ep/BBBB?key=1",
+            appendChargeBoxId: false,
+          },
+        },
+      },
+    });
+    expect(t.chargers.get("CP-2")?.primary.id).toBe("csms");
+  });
+
+  it("rejects an id naming another server, even on another port or scheme", () => {
+    for (const url of [
+      "wss://other.example.com/ocpp",
+      "wss://csms.example.com:8443/ocpp",
+      "ws://csms.example.com/ocpp",
+    ]) {
+      expect(() =>
+        parseRouteTable({
+          default: { primary: { id: "csms", url: "wss://csms.example.com/ocpp" } },
+          chargers: { "CP-1": { primary: { id: "csms", url } } },
+        }),
+      ).toThrow(/backend id "csms" names different servers in the global routes/);
+    }
+  });
+
+  it("lets routes of a scope share an id for the same URL", () => {
+    const t = parseRouteTable({
+      default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
+      chargers: {
+        "CP-1": {
+          primary: { id: "other", url: "wss://b.example.com/ocpp" },
+          secondaries: [{ id: "csms", url: "wss://a.example.com/ocpp" }],
+        },
+      },
+    });
+    expect(t.chargers.get("CP-1")?.secondaries[0].id).toBe("csms");
+  });
+
+  it("scopes ids per tenant", () => {
+    expect(() =>
+      parseRouteTable({
+        default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
+        tenants: {
+          acme: { default: { primary: { id: "csms", url: "wss://acme.example.com/ocpp" } } },
+          beta: { default: { primary: { id: "csms", url: "wss://beta.example.com/ocpp" } } },
+        },
+      }),
+    ).not.toThrow();
+  });
+
+  describe("when required", () => {
+    const options = { requireBackendIds: true };
+
+    it("accepts a table where every backend has an id", () => {
+      expect(() => parseRouteTable(withIds, options)).not.toThrow();
+    });
+
+    it("rejects a URL-string backend", () => {
+      expect(() =>
+        parseRouteTable(
+          {
+            default: {
+              primary: { id: "a", url: "wss://a.example.com" },
+              secondaries: ["wss://b.example.com"],
+            },
+          },
+          options,
+        ),
+      ).toThrow(
+        /route "default" secondary #0 must have an "id" \(required when trace archiving is enabled\)/,
+      );
+    });
+
+    it("rejects an object backend without id, in a tenant too", () => {
+      expect(() =>
+        parseRouteTable(
+          {
+            tenants: {
+              acme: { chargers: { "CP-1": { primary: { url: "wss://a.example.com" } } } },
+            },
+          },
+          options,
+        ),
+      ).toThrow(/route "tenants.acme.chargers.CP-1" primary must have an "id"/);
+    });
+  });
+});
+
+describe("RouteStore with required backend ids", () => {
+  function writeRoutes(dir: string, table: object): string {
+    const path = join(dir, "routes.json");
+    writeFileSync(path, JSON.stringify(table));
+    return path;
+  }
+
+  it("refuses to load a table without backend ids", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+    try {
+      const path = writeRoutes(dir, TABLE);
+      expect(() => RouteStore.load(path, { requireBackendIds: true })).toThrow(/must have an "id"/);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it("keeps the previous table when a reload drops the ids", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+    try {
+      const path = writeRoutes(dir, {
+        default: { primary: { id: "csms", url: "wss://a.example.com/ocpp" } },
+      });
+      const store = RouteStore.load(path, { requireBackendIds: true });
+      writeRoutes(dir, { default: { primary: "wss://b.example.com/ocpp" } });
+      store.reload();
+      expect(store.resolve(null, "CP-1")?.primary).toEqual({
+        id: "csms",
+        url: "wss://a.example.com/ocpp",
+        appendChargeBoxId: true,
+      });
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+
+describe("committed examples", () => {
+  it.each(["routes.example.json", "routes.multi-tenant.example.json"])(
+    "%s is a valid routing table, ready for trace archiving",
+    (file) => {
+      expect(() =>
+        loadRouteTable(join(__dirname, "..", file), { requireBackendIds: true }),
+      ).not.toThrow();
+    },
+  );
 });

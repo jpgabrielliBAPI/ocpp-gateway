@@ -1,22 +1,22 @@
 {
   "default": {
-    "primary": "wss://csms.example.com/ocpp",
+    "primary": { "id": "csms", "url": "wss://csms.example.com/ocpp" },
     "secondaries": []
   },
   "tenants": {
     "tenant-a": {
-      "default": { "primary": "wss://csms-a.example.com/ocpp" },
+      "default": { "primary": { "id": "csms-a", "url": "wss://csms-a.example.com/ocpp" } },
       "chargers": {
         "CP-001": {
-          "primary": "wss://csms-a.example.com/ocpp",
-          "secondaries": ["wss://analytics.example.com/ocpp"]
+          "primary": { "id": "csms-a", "url": "wss://csms-a.example.com/ocpp" },
+          "secondaries": [{ "id": "analytics", "url": "wss://analytics.example.com/ocpp" }]
         }
       }
     },
     "tenant-b": {
       "hostnames": ["ocpp.customer-b.example"],
       "chargers": {
-        "CP-001": { "primary": "wss://csms-b.example.com/ocpp" }
+        "CP-001": { "primary": { "id": "csms-b", "url": "wss://csms-b.example.com/ocpp" } }
       }
     }
   }

@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Optional trace archiving to MongoDB (`TRACE_ENABLED`, `TRACE_MONGODB_URI`,
+  `TRACE_MONGODB_DATABASE`, `TRACE_RETENTION_DAYS`, `TRACE_QUEUE_MAX`). Every
+  OCPP frame received from a charger, the primary or a secondary CSMS is
+  stored once as an [Open OCPP Trace](https://github.com/open-ocpp-trace/specification)
+  v1.1 record, with its tenant, gateway session, source, each destination's
+  delivery outcome (queued, submitted, written, failed, dropped) and the CALL
+  it answers. Traces expire through a MongoDB TTL index; nothing is written
+  while that index cannot be created. Archiving never
+  delays forwarding: writes are batched in the background, bounded in memory,
+  and dropped (counted and logged) when MongoDB is unavailable. Disabled by
+  default; the MongoDB driver is not even loaded then.
+- Backends accept a stable `id` (`{ "id": "csms-a", "url": "…" }`), naming the
+  logical CSMS in traces instead of its URL. Required on every backend when
+  trace archiving is enabled; validated whenever present (format, unique within
+  a route, one server — scheme, host, port — per id within the global routes or
+  a tenant).
+- `docker-compose.mongo.yml`, a Compose overlay running a local MongoDB for
+  trace archiving.
+
+### Changed
+
+- On shutdown, charger sessions are torn down immediately instead of after
+  each charger's close handshake, so upstream links close sooner.
+
 ## [0.1.0] - 2026-10-06
 
 First release of **ocpp-gateway**, a fork of

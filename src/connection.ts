@@ -1,11 +1,15 @@
+import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 import { createLogger } from "./logger";
 import { type Route, buildTargetUrl } from "./routes";
 import { type SessionKey, formatSessionKey } from "./sessions";
+import { type DeliveryTracker, type FrameEncoding, SessionTracer } from "./trace/session-tracer";
+import type { TraceSink } from "./trace/writer";
+import { errorMessage } from "./utils/errors";
 import { OCPP_SUBPROTOCOLS } from "./types";
 import { BoundedQueue } from "./utils/bounded-queue";
 import { redactUrl } from "./utils/url";
-import { forwardPing, forwardPong, rawDataToString } from "./utils/websocket";
+import { forwardPing, forwardPong, isUtf8Data, rawDataToString } from "./utils/websocket";
 
 /**
  * Manages the full lifecycle of a single charger connection:
@@ -26,6 +30,10 @@ import { forwardPing, forwardPong, rawDataToString } from "./utils/websocket";
  *   messages while reconnecting so brief blips don't lose data.
  * - Every queue is bounded by count and by total bytes, dropping the
  *   oldest messages first.
+ * - With a trace sink, every received frame is archived once, at ingress,
+ *   and each destination's delivery outcome is tracked (queued, submitted,
+ *   written, failed, dropped) on that same record. Without one, forwarding
+ *   is exactly as if tracing did not exist.
  */
 
 export const SECONDARY_RECONNECT_DELAY_MS = 10_000;
@@ -39,22 +47,33 @@ export const UPSTREAM_MAX_QUEUE = 100;
  */
 export const UPSTREAM_MAX_QUEUE_BYTES = 1024 * 1024;
 
+/** A message waiting for its link to open, with its trace delivery when archiving. */
+interface QueuedMessage {
+  raw: string;
+  delivery?: DeliveryTracker;
+}
+
 interface SecondaryState {
+  /** Backend id, the secondary's name in traces. */
+  id: string;
   url: string;
   /** `url` without credentials: the only form that may be logged. */
   logUrl: string;
   ws: WebSocket | null;
-  queue: BoundedQueue;
+  queue: BoundedQueue<QueuedMessage>;
   keepalive: ReturnType<typeof setInterval> | null;
   reconnectTimer: ReturnType<typeof setTimeout> | null;
   lastPongAt: number;
 }
 
 export class ChargerConnection {
+  /** Unique per charger WebSocket connection: tells apart sessions of the same charger. */
+  readonly sessionId = randomUUID();
   private readonly log;
   private primary: WebSocket | null = null;
-  private readonly primaryQueue: BoundedQueue;
+  private readonly primaryQueue: BoundedQueue<QueuedMessage>;
   private secondaries: SecondaryState[] = [];
+  private tracer: SessionTracer | undefined;
   private alive = true;
 
   constructor(
@@ -65,6 +84,7 @@ export class ChargerConnection {
     private readonly authHeader: string | undefined,
     private readonly maxPayload: number,
     private readonly onEnd: () => void,
+    private readonly traceSink?: TraceSink,
   ) {
     // Tag logs with the tenant too: two tenants may share a chargeBoxId.
     this.log = createLogger(formatSessionKey(key));
@@ -93,6 +113,8 @@ export class ChargerConnection {
     for (const backend of this.route.secondaries) {
       const url = buildTargetUrl(backend, this.key.chargeBoxId);
       const state: SecondaryState = {
+        // Only read when archiving, which requires backend ids (see startProxy).
+        id: backend.id!,
         url,
         logUrl: redactUrl(url),
         ws: null,
@@ -111,30 +133,65 @@ export class ChargerConnection {
       this.secondaries.push(state);
     }
 
-    this.charger.on("message", (data) => {
+    // Destinations are the secondaries actually set up, in forwarding order.
+    if (this.traceSink) {
+      this.tracer = new SessionTracer(
+        {
+          sessionId: this.sessionId,
+          tenantId: this.key.tenantId,
+          chargePointId: this.key.chargeBoxId,
+          protocol: this.protocol,
+          primaryId: this.route.primary.id!,
+          secondaryIds: this.secondaries.map((sec) => sec.id),
+        },
+        this.traceSink,
+      );
+    }
+
+    this.charger.on("message", (data, isBinary) => {
       const raw = rawDataToString(data);
       this.log.debugOcppFrame("charger → proxy", raw);
+      // Archived once, here at ingress, however many links it goes to.
+      const frame = this.tracer?.fromCharger(raw, encodingOf(data, isBinary));
+
+      // ws still delivers frames in flight while the charger closes: nothing
+      // forwards them once the session has ended.
+      if (!this.alive) {
+        this.log.warn("session ended, dropping message");
+        if (frame) {
+          for (let i = 0; i <= this.secondaries.length; i++)
+            frame.delivery(i).dropped("session-ended");
+          frame.commit();
+        }
+        return;
+      }
 
       const primary = this.primary;
+      const primaryDelivery = frame?.delivery(0);
       if (primary?.readyState === WebSocket.OPEN) {
-        primary.send(raw);
+        send(primary, raw, primaryDelivery);
       } else if (primary?.readyState === WebSocket.CONNECTING) {
-        this.enqueue("primary", this.primaryQueue, raw);
+        this.enqueue("primary", this.primaryQueue, { raw, delivery: primaryDelivery });
       } else {
         this.log.warn("primary not open, dropping message", { readyState: primary?.readyState });
+        primaryDelivery?.dropped("link-not-open");
       }
 
-      for (const sec of this.secondaries) {
+      this.secondaries.forEach((sec, index) => {
+        const delivery = frame?.delivery(index + 1);
         if (sec.ws?.readyState === WebSocket.OPEN) {
           try {
-            sec.ws.send(raw);
+            send(sec.ws, raw, delivery);
           } catch (err) {
             this.log.warn("secondary send failed", { url: sec.logUrl, error: errorMessage(err) });
+            delivery?.failed(errorMessage(err));
           }
         } else {
-          this.enqueue("secondary", sec.queue, raw, { url: sec.logUrl });
+          this.enqueue("secondary", sec.queue, { raw, delivery }, { url: sec.logUrl });
         }
-      }
+      });
+
+      frame?.commit();
     });
 
     this.charger.on("close", (code, reason) => {
@@ -183,12 +240,16 @@ export class ChargerConnection {
       this.flushPrimaryQueue(ws);
     });
 
-    ws.on("message", (data) => {
+    ws.on("message", (data, isBinary) => {
       const raw = rawDataToString(data);
       this.log.debugOcppFrame("primary → charger", raw);
+      const frame = this.tracer?.fromPrimary(raw, encodingOf(data, isBinary));
       if (this.charger.readyState === WebSocket.OPEN) {
-        this.charger.send(raw);
+        send(this.charger, raw, frame?.delivery(0));
+      } else {
+        frame?.delivery(0).dropped("link-not-open");
       }
+      frame?.commit();
     });
 
     ws.on("close", (code, reason) => {
@@ -239,13 +300,15 @@ export class ChargerConnection {
       this.startSecondaryKeepalive(state, ws);
     });
 
-    ws.on("message", (data) => {
+    ws.on("message", (data, isBinary) => {
       const raw = rawDataToString(data);
+      // An application-level keepalive some CSMS send, not an OCPP frame: never archived.
       if (raw === "__pong__") {
         state.lastPongAt = Date.now();
         return;
       }
       this.log.debugOcppFrame("secondary response (ignored)", raw, { url: state.logUrl });
+      this.tracer?.fromSecondary(state.id, raw, encodingOf(data, isBinary));
     });
 
     ws.on("pong", () => {
@@ -272,11 +335,11 @@ export class ChargerConnection {
     return ws;
   }
 
-  private createQueue(): BoundedQueue {
+  private createQueue(): BoundedQueue<QueuedMessage> {
     // Sized so a maximum-size message always fits; the queue also keeps any
     // single incoming message, as a safety net for frames that grow when
     // decoded (invalid UTF-8 becomes U+FFFD).
-    return new BoundedQueue(
+    return new BoundedQueue<QueuedMessage>(
       UPSTREAM_MAX_QUEUE,
       Math.max(UPSTREAM_MAX_QUEUE_BYTES, this.maxPayload),
     );
@@ -284,15 +347,17 @@ export class ChargerConnection {
 
   private enqueue(
     link: "primary" | "secondary",
-    queue: BoundedQueue,
-    raw: string,
+    queue: BoundedQueue<QueuedMessage>,
+    message: QueuedMessage,
     fields: Record<string, unknown> = {},
   ) {
-    const dropped = queue.push(raw);
-    if (dropped > 0) {
+    message.delivery?.queued();
+    const dropped = queue.push(message);
+    for (const old of dropped) old.delivery?.dropped("queue-overflow");
+    if (dropped.length > 0) {
       this.log.warn(`${link} queue full, dropping oldest message`, {
         ...fields,
-        dropped,
+        dropped: dropped.length,
         ...queueStats(queue),
       });
     }
@@ -302,7 +367,7 @@ export class ChargerConnection {
   private flushPrimaryQueue(ws: WebSocket) {
     if (this.primaryQueue.length === 0) return;
     this.log.info("primary flushing queued messages", queueStats(this.primaryQueue));
-    for (const msg of this.primaryQueue.drain()) ws.send(msg);
+    for (const msg of this.primaryQueue.drain()) send(ws, msg.raw, msg.delivery);
   }
 
   private flushSecondaryQueue(state: SecondaryState, ws: WebSocket) {
@@ -313,9 +378,10 @@ export class ChargerConnection {
     });
     for (const msg of state.queue.drain()) {
       try {
-        ws.send(msg);
-      } catch {
+        send(ws, msg.raw, msg.delivery);
+      } catch (err) {
         /* best-effort */
+        msg.delivery?.failed(errorMessage(err));
       }
     }
   }
@@ -379,7 +445,7 @@ export class ChargerConnection {
   teardown() {
     if (!this.alive) return;
     this.alive = false;
-    this.primaryQueue.clear();
+    dropAll(this.primaryQueue);
 
     for (const sec of this.secondaries) {
       this.stopSecondaryKeepalive(sec);
@@ -387,7 +453,7 @@ export class ChargerConnection {
         clearTimeout(sec.reconnectTimer);
         sec.reconnectTimer = null;
       }
-      sec.queue.clear();
+      dropAll(sec.queue);
     }
 
     const close = (ws: WebSocket | null) => {
@@ -405,8 +471,27 @@ export class ChargerConnection {
   }
 }
 
+/**
+ * Send `raw`, reporting the outcome to `delivery` when archiving: `written`
+ * once ws has written it to the socket, `failed` on error. Without a
+ * delivery, a plain send as before archiving existed.
+ */
+function send(ws: WebSocket, raw: string, delivery: DeliveryTracker | undefined) {
+  if (!delivery) {
+    ws.send(raw);
+    return;
+  }
+  delivery.submitted();
+  ws.send(raw, (error) => delivery.settled(error));
+}
+
+/** Empty `queue` of a session that ended: its messages will never be sent. */
+function dropAll(queue: BoundedQueue<QueuedMessage>) {
+  for (const msg of queue.drain()) msg.delivery?.dropped("session-ended");
+}
+
 /** Log fields describing a queue's fill level and bounds. */
-function queueStats(queue: BoundedQueue) {
+function queueStats(queue: BoundedQueue<QueuedMessage>) {
   return {
     count: queue.length,
     bytes: queue.bytes,
@@ -415,6 +500,8 @@ function queueStats(queue: BoundedQueue) {
   };
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
+/** How a frame arrived, for the archive: bytes that are not UTF-8 were decoded lossily. */
+function encodingOf(data: WebSocket.RawData, isBinary: boolean): FrameEncoding {
+  if (!isBinary) return "text";
+  return isUtf8Data(data) ? "binary" : "lossy-binary";
 }

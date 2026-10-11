@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { redactUrl } from "../src/utils/url";
+import { maskUserinfo, redactUrl } from "../src/utils/url";
 
 describe("redactUrl", () => {
   it.each([
@@ -27,5 +27,23 @@ describe("redactUrl", () => {
     ["does not echo an unparseable value", "not a url, secret", "<invalid url>"],
   ])("%s", (_description, input, expected) => {
     expect(redactUrl(input)).toBe(expected);
+  });
+});
+
+describe("maskUserinfo", () => {
+  it("masks the credentials of every URL in a message", () => {
+    expect(
+      maskUserinfo(
+        "failed mongodb://admin:s3cret@db-1.example.com:27017,db-2:27017/x and mongodb+srv://u:p@c.example.com",
+      ),
+    ).toBe(
+      "failed mongodb://***@db-1.example.com:27017,db-2:27017/x and mongodb+srv://***@c.example.com",
+    );
+  });
+
+  it("leaves a message without credentials unchanged", () => {
+    expect(maskUserinfo("connect ECONNREFUSED 127.0.0.1:27017")).toBe(
+      "connect ECONNREFUSED 127.0.0.1:27017",
+    );
   });
 });

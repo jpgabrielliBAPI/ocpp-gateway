@@ -1,15 +1,19 @@
 {
   "default": {
-    "primary": "wss://csms.example.com/ocpp",
+    "primary": { "id": "csms", "url": "wss://csms.example.com/ocpp" },
     "secondaries": []
   },
   "chargers": {
     "CP-001": {
-      "primary": "wss://primary-csms.example.com/ocpp",
-      "secondaries": ["wss://analytics.example.com/ocpp"]
+      "primary": { "id": "primary-csms", "url": "wss://primary-csms.example.com/ocpp" },
+      "secondaries": [{ "id": "analytics", "url": "wss://analytics.example.com/ocpp" }]
     },
     "CP-002": {
-      "primary": { "url": "wss://fixed-csms.example.com/XXXXXXXX", "appendChargeBoxId": false },
+      "primary": {
+        "id": "fixed-csms",
+        "url": "wss://fixed-csms.example.com/XXXXXXXX",
+        "appendChargeBoxId": false
+      },
       "secondaries": []
     }
   }

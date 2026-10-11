@@ -6,10 +6,18 @@ import { createLogger } from "./logger";
 import type { RouteStore } from "./routes";
 import { type SessionKey, SessionRegistry } from "./sessions";
 import { HostnameTenantResolver, type TenantResolver, readSingleHeader } from "./tenants";
+import type { TraceSink } from "./trace/writer";
 import { OCPP_SUBPROTOCOLS } from "./types";
 import { redactUrl } from "./utils/url";
 
 const log = createLogger("proxy");
+
+export interface ProxyOptions {
+  /** Resolves the tenant from the dialled hostname. Default: hostnames from the routes file and `TENANT_BASE_DOMAIN`. */
+  tenants?: TenantResolver;
+  /** Where to archive every OCPP frame. Unset: archiving disabled. */
+  traceSink?: TraceSink;
+}
 
 /**
  * Start the OCPP proxy server.
@@ -24,14 +32,17 @@ const log = createLogger("proxy");
  * read-only secondaries; the id is then appended to each upstream URL unless
  * that backend opts out.
  */
-export function startProxy(
-  config: Config,
-  routes: RouteStore,
-  tenants: TenantResolver = new HostnameTenantResolver({
-    baseDomain: config.tenantBaseDomain,
-    lookupHostname: (hostname) => routes.findTenantByHostname(hostname),
-  }),
-) {
+export function startProxy(config: Config, routes: RouteStore, options: ProxyOptions = {}) {
+  // Traces name each CSMS by its backend id: every route must have them.
+  if (options.traceSink && !routes.requiresBackendIds) {
+    throw new Error("trace archiving needs a route store loaded with requireBackendIds");
+  }
+  const tenants =
+    options.tenants ??
+    new HostnameTenantResolver({
+      baseDomain: config.tenantBaseDomain,
+      lookupHostname: (hostname) => routes.findTenantByHostname(hostname),
+    });
   const sessions = new SessionRegistry<ChargerConnection>();
 
   const server = createServer((req, res) => {
@@ -126,6 +137,7 @@ export function startProxy(
       () => {
         sessions.remove(key, conn);
       },
+      options.traceSink,
     );
     sessions.add(key, authHeader, conn);
   });
@@ -142,13 +154,19 @@ export function startProxy(
       tenantBaseDomain: config.tenantBaseDomain,
       tenantHostHeader: config.tenantHostHeader ?? "host",
       maxMessageBytes: config.maxMessageBytes,
+      traceArchiving: options.traceSink !== undefined,
     });
   });
 
-  /** Close every charger session, then stop accepting connections. */
+  /**
+   * Close every charger session, then stop accepting connections. Sessions
+   * are torn down right away (not when each charger's close handshake ends),
+   * so their last trace outcomes are reported before this returns.
+   */
   const close = () =>
     new Promise<void>((resolve) => {
       for (const ws of wss.clients) ws.close(1001, "Server shutting down");
+      sessions.teardownAll();
       wss.close();
       server.close(() => resolve());
     });

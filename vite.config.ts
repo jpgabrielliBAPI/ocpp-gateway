@@ -12,7 +12,8 @@ export default defineConfig({
     // Markdown is excluded: Oxfmt's experimental Markdown formatting disagrees
     // across platforms (macOS strips the trailing newline, Linux requires it),
     // which made `vp fmt --check` flap between local and CI. Format code only.
-    ignorePatterns: ["dist/**", "**/*.md"],
+    // The vendored Open OCPP Trace files stay byte-identical to upstream.
+    ignorePatterns: ["dist/**", "**/*.md", "test/fixtures/open-ocpp-trace/**"],
   },
   test: {
     // deploy/cloudflare/src/forward.ts is runtime-agnostic, so its tests run here too.

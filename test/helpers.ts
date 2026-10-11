@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
 import { type Config, DEFAULT_MAX_MESSAGE_BYTES } from "../src/config";
-import { startProxy } from "../src/proxy";
+import { type ProxyOptions, startProxy } from "../src/proxy";
 import { RouteStore } from "../src/routes";
 import { OCPP_SUBPROTOCOLS } from "../src/types";
 
@@ -16,11 +16,17 @@ export const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(r
  * dial) with the given routing table and resolve once it is listening. Call
  * `close()` to shut it down.
  */
-export async function startGateway(table: object, overrides: Partial<Config> = {}) {
+export async function startGateway(
+  table: object,
+  overrides: Partial<Config> = {},
+  options: ProxyOptions = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-test-"));
   const routesFile = join(dir, "routes.json");
   writeFileSync(routesFile, JSON.stringify(table));
-  const routes = RouteStore.load(routesFile);
+  const routes = RouteStore.load(routesFile, {
+    requireBackendIds: options.traceSink !== undefined,
+  });
   rmSync(dir, { recursive: true });
 
   const gateway = startProxy(
@@ -33,6 +39,7 @@ export async function startGateway(table: object, overrides: Partial<Config> = {
       ...overrides,
     },
     routes,
+    options,
   );
   await once(gateway.server, "listening");
   const { address, port } = gateway.server.address() as AddressInfo;
@@ -60,13 +67,20 @@ export interface CsmsConnection {
  * A mock CSMS that records what it receives and replies with a tagged result.
  * Listens on an ephemeral port unless `port` is given, on 127.0.0.1 unless
  * `host` is given. With `holdHandshakes`, every upgrade is parked until
- * `releaseHandshakes()`, so the gateway's link stays `CONNECTING`.
+ * `releaseHandshakes()`, so the gateway's link stays `CONNECTING`. `reply`
+ * replaces the tagged result: it maps each received message to the frame to
+ * answer with, if any.
  */
 export function makeCsms(
   tag: string,
   port = 0,
-  options: { holdHandshakes?: boolean; host?: string } = {},
+  options: {
+    holdHandshakes?: boolean;
+    host?: string;
+    reply?: (message: string) => string | undefined;
+  } = {},
 ) {
+  const reply = options.reply ?? (() => JSON.stringify([3, "reply", { from: tag }]));
   const received: string[] = [];
   const connections: CsmsConnection[] = [];
   const held: ((accept: boolean) => void)[] = [];
@@ -96,7 +110,8 @@ export function makeCsms(
     });
     ws.on("message", (data) => {
       received.push(data.toString());
-      ws.send(JSON.stringify([3, "reply", { from: tag }]));
+      const answer = reply(data.toString());
+      if (answer !== undefined) ws.send(answer);
     });
   });
 

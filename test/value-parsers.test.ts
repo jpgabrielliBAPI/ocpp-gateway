@@ -5,6 +5,7 @@ import {
   parseEnv,
   parseInteger,
   parseIntegerInRange,
+  parseOptionalIntegerInRange,
   parsePositiveInteger,
   parseOptionalHeaderName,
   parseOptionalPositiveInteger,
@@ -28,6 +29,22 @@ describe("parseIntegerInRange", () => {
 
   it("throws when value is outside the range", () => {
     expect(() => parseIntegerInRange("11", 1, 10)).toThrow(
+      'Value must be an integer between 1 and 10: "11"',
+    );
+  });
+});
+
+describe("parseOptionalIntegerInRange", () => {
+  it.each([undefined, "", "  "])("returns the fallback for %j", (value) => {
+    expect(parseOptionalIntegerInRange(value, 7, 1, 10)).toBe(7);
+  });
+
+  it("parses a value within the bounds", () => {
+    expect(parseOptionalIntegerInRange(" 10 ", 7, 1, 10)).toBe(10);
+  });
+
+  it("rejects a value outside the bounds", () => {
+    expect(() => parseOptionalIntegerInRange("11", 7, 1, 10)).toThrow(
       'Value must be an integer between 1 and 10: "11"',
     );
   });

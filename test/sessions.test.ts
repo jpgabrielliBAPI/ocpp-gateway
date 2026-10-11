@@ -130,6 +130,23 @@ describe("SessionRegistry", () => {
   });
 });
 
+describe("SessionRegistry.teardownAll", () => {
+  it("tears down every live session, across charge points and tenants", () => {
+    const registry = new SessionRegistry<FakeSession>();
+    const sessions = [
+      open(registry, key("CP-1"), "a").session,
+      open(registry, key("CP-1"), "b").session,
+      open(registry, key("CP-2"), undefined).session,
+      open(registry, key("CP-1", "acme"), "a").session,
+    ];
+
+    registry.teardownAll();
+    expect(sessions.every((session) => session.tornDown)).toBe(true);
+    // Each session left the registry as it ended.
+    expect(registry.evict(key("CP-1"), "a")).toEqual({ replaced: 0, kept: 0 });
+  });
+});
+
 describe("formatSessionKey", () => {
   it("is the bare chargeBoxId without a tenant, tenant/chargeBoxId otherwise", () => {
     expect(formatSessionKey(key("CP-001"))).toBe("CP-001");

@@ -14,6 +14,20 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # A real MongoDB for the trace archiving tests (skipped without
+    # TRACE_TEST_MONGODB_URI).
+    services:
+      mongo:
+        image: mongo:8.0
+        ports:
+          - 27017:27017
+        options: >-
+          --health-cmd "mongosh --quiet --eval 'db.runCommand({ ping: 1 })'"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TRACE_TEST_MONGODB_URI: mongodb://127.0.0.1:27017
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
 

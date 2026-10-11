@@ -44,7 +44,7 @@ CI (`cloudflare` job in `.github/workflows/docker.yml`) runs `npm ci`, `npm run 
 | `LOG_LEVEL`          | `vars`              | Gateway log level (`debug`, `info`, `warn`, `error`)                                                 |
 | `routes[].pattern`   | `wrangler.jsonc`    | `*.ocpp.example.com/*` on your zone                                                                   |
 
-The Container class (`src/index.ts`) passes these to the gateway and also sets `TENANT_HOST_HEADER=x-forwarded-host`, `ROUTES_FILE=/tmp/routes.json` and `PORT=9000`. Replace every `example.com` with your own domain. `observability` is enabled so that the gateway's logs (the container's stdout) show in the dashboard.
+The Container class (`src/index.ts`) passes these to the gateway and also sets `TENANT_HOST_HEADER=x-forwarded-host`, `ROUTES_FILE=/tmp/routes.json` and `PORT=9000`. No other variable reaches the container: [trace archiving](../../README.md#trace-archiving-optional) (`TRACE_*`) stays disabled in this deployment. Replace every `example.com` with your own domain. `observability` is enabled so that the gateway's logs (the container's stdout) show in the dashboard.
 
 ## Deploy
 

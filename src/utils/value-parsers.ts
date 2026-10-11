@@ -26,6 +26,17 @@ export function parseIntegerInRange(value: string, minimum: number, maximum: num
   return result;
 }
 
+/** An integer in [`minimum`, `maximum`]; unset or empty means `fallbackValue`. */
+export function parseOptionalIntegerInRange(
+  value: string | undefined,
+  fallbackValue: number,
+  minimum: number,
+  maximum: number,
+): number {
+  if (value === undefined || value.trim() === "") return fallbackValue;
+  return parseIntegerInRange(value, minimum, maximum);
+}
+
 export function parsePositiveInteger(value: string): number {
   const result = parseInteger(value);
 

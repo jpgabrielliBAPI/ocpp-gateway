@@ -1,0 +1,24 @@
+# Local MongoDB for trace archiving, for development and evaluation:
+#   docker compose -f docker-compose.yml -f docker-compose.mongo.yml up --build
+# Every backend in routes.json needs an "id" (see README "Trace archiving").
+# MongoDB is only reachable from the Compose network (no published port) and
+# runs without authentication: in production, enable auth and TLS and pass
+# credentials in TRACE_MONGODB_URI.
+services:
+  ocpp-gateway:
+    environment:
+      TRACE_ENABLED: "true"
+      TRACE_MONGODB_URI: mongodb://mongo:27017
+    depends_on:
+      - mongo
+
+  mongo:
+    image: mongo:8.0
+    expose:
+      - "27017"
+    volumes:
+      - mongo-data:/data/db
+    restart: unless-stopped
+
+volumes:
+  mongo-data:
