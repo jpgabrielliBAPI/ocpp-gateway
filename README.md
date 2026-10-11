@@ -380,7 +380,7 @@ Each document expires `TRACE_RETENTION_DAYS` after it was received: `expiresAt` 
 
 Archiving never delays nor breaks forwarding. Frames are queued in memory and written by batches in the background; MongoDB is never awaited on the forwarding path.
 
-- MongoDB down or slow: each batch is retried twice with backoff, then dropped. The gateway starts and keeps forwarding while MongoDB is unreachable.
+- MongoDB down or slow: each batch is retried twice with backoff, then dropped. The gateway starts and keeps forwarding while MongoDB is unreachable. A write fails after `serverSelectionTimeoutMS=5000` without a reachable server, or `socketTimeoutMS=30000` on a stuck connection; set either (or any other driver option, e.g. TLS) in `TRACE_MONGODB_URI` to override it.
 - The in-memory queue is bounded (`TRACE_QUEUE_MAX` traces and 64 MiB estimated): when full, new traces are dropped. Memory stays bounded during an outage.
 - On shutdown (`SIGTERM`/`SIGINT`), sessions end first (queued frames are recorded as `dropped`, `session-ended`), then pending traces are written for up to 3 seconds; whatever is left is dropped.
 - Every loss is counted: the `trace stats` log line (every minute, when something changed) reports `accepted`, `persisted`, `writeFailures`, `dropped` (`queueFull`, `writeFailed`, `rejected`, `shutdown`), `deliveryUpdates` and the queue size; `trace store unavailable` / `trace store available again` mark outages.

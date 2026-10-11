@@ -5,6 +5,7 @@ import {
   MongoTraceStore,
   TRACE_COLLECTION,
   type MongoTraceDocument,
+  defaultClientOptions,
   fitDocumentLimit,
   toMongoDocument,
 } from "../../src/trace/mongo-store";
@@ -90,6 +91,24 @@ describe("fitDocumentLimit", () => {
     const raw = `[2,"m1","DataTransfer",{"data":"${"x".repeat(10_000)}"}]`;
     const mongo = toMongoDocument(traceDocs(["charger", raw])[0], 30);
     expect(fitDocumentLimit(mongo, 8_000)).toBeNull();
+  });
+});
+
+describe("defaultClientOptions", () => {
+  it("bounds how long a write may wait for MongoDB", () => {
+    expect(defaultClientOptions("mongodb://db.example.com:27017/")).toEqual({
+      appName: "ocpp-gateway",
+      serverSelectionTimeoutMS: 5_000,
+      socketTimeoutMS: 30_000,
+    });
+  });
+
+  it("lets the connection string override every default, whatever the case", () => {
+    expect(
+      defaultClientOptions(
+        "mongodb+srv://u:p@cluster.example.com/db?appname=x&serverSelectionTimeoutMS=1000&SOCKETTIMEOUTMS=0",
+      ),
+    ).toEqual({});
   });
 });
 

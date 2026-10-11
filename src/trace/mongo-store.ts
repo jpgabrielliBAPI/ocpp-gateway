@@ -108,6 +108,25 @@ export function fitDocumentLimit(
   return bsonSize(fallback) <= limit ? fallback : null;
 }
 
+/**
+ * Driver defaults for archiving, each applied only when the connection string
+ * does not set it (options given in code would override the URI's): fail a
+ * write fast while MongoDB is down or a socket is stuck, so the writer retries
+ * then drops instead of waiting forever.
+ */
+export function defaultClientOptions(uri: string): MongoClientOptions {
+  const query = uri.includes("?") ? uri.slice(uri.indexOf("?") + 1) : "";
+  const inUri = new Set([...new URLSearchParams(query).keys()].map((key) => key.toLowerCase()));
+  const defaults: MongoClientOptions = {
+    appName: "ocpp-gateway",
+    serverSelectionTimeoutMS: 5_000,
+    socketTimeoutMS: 30_000,
+  };
+  return Object.fromEntries(
+    Object.entries(defaults).filter(([key]) => !inUri.has(key.toLowerCase())),
+  );
+}
+
 /** The statuses a delivery may still move forward from to reach `status`. */
 function earlierStatuses(status: DeliveryStatus): DeliveryStatus[] {
   return (Object.keys(DELIVERY_STATUS_RANK) as DeliveryStatus[]).filter(
@@ -126,9 +145,7 @@ export class MongoTraceStore implements TraceStore {
   ): MongoTraceStore {
     // Parses the URI synchronously (throws when invalid); connects on first use.
     const client = new MongoClient(config.mongodbUri, {
-      appName: "ocpp-gateway",
-      // Fail a write fast while MongoDB is down: the writer retries and drops.
-      serverSelectionTimeoutMS: 5_000,
+      ...defaultClientOptions(config.mongodbUri),
       ...options,
     });
     return new MongoTraceStore(client, config.database, config.retentionDays);
