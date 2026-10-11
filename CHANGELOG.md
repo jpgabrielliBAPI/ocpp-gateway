@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   default; the MongoDB driver is not even loaded then.
 - Backends accept a stable `id` (`{ "id": "csms-a", "url": "…" }`), naming the
   logical CSMS in traces instead of its URL. Required on every backend when
-  trace archiving is enabled.
+  trace archiving is enabled; validated whenever present (format, unique within
+  a route, one URL per id within the global routes or a tenant).
 - `docker-compose.mongo.yml`, a Compose overlay running a local MongoDB for
   trace archiving.
 
