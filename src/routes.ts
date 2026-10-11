@@ -13,9 +13,21 @@ const log = createLogger("routes");
  * `appendChargeBoxId: false` for backends that expose a fixed endpoint URL.
  */
 export interface Backend {
+  /**
+   * Stable name of the logical CSMS (not of a connection), used by trace
+   * archiving instead of the URL, which may carry credentials.
+   */
+  id?: string;
   url: string;
   appendChargeBoxId: boolean;
 }
+
+export interface RouteTableOptions {
+  /** Every backend must have an `id` (trace archiving needs one per CSMS). */
+  requireBackendIds?: boolean;
+}
+
+const BACKEND_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /**
  * A single routing target: one bidirectional primary CSMS and zero or more
@@ -69,9 +81,12 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-/** Accept either a bare URL string or `{ url, appendChargeBoxId? }`. */
-function parseBackend(value: unknown, where: string): Backend {
+/** Accept either a bare URL string or `{ id?, url, appendChargeBoxId? }`. */
+function parseBackend(value: unknown, where: string, options: RouteTableOptions): Backend {
+  const missingId = () =>
+    new Error(`${where} must have an "id" (required when trace archiving is enabled)`);
   if (typeof value === "string") {
+    if (options.requireBackendIds) throw missingId();
     return { url: parseUrl(value, where), appendChargeBoxId: true };
   }
   if (!isPlainObject(value)) {
@@ -83,10 +98,23 @@ function parseBackend(value: unknown, where: string): Backend {
     throw new Error(`${where} "appendChargeBoxId" must be a boolean`);
   }
 
-  return { url: parseUrl(value.url, where), appendChargeBoxId: append };
+  const { id } = value;
+  if (id === undefined) {
+    if (options.requireBackendIds) throw missingId();
+  } else if (typeof id !== "string" || !BACKEND_ID.test(id)) {
+    throw new Error(
+      `${where} "id" must be 1-64 letters, digits, ".", "_" or "-", starting with a letter or digit`,
+    );
+  }
+
+  return {
+    ...(id !== undefined && { id }),
+    url: parseUrl(value.url, where),
+    appendChargeBoxId: append,
+  };
 }
 
-function parseRoute(value: unknown, where: string): Route {
+function parseRoute(value: unknown, where: string, options: RouteTableOptions): Route {
   if (!isPlainObject(value)) {
     throw new Error(`route "${where}" must be an object`);
   }
@@ -94,7 +122,7 @@ function parseRoute(value: unknown, where: string): Route {
   if (value.primary === undefined) {
     throw new Error(`route "${where}" must define a "primary"`);
   }
-  const primary = parseBackend(value.primary, `route "${where}" primary`);
+  const primary = parseBackend(value.primary, `route "${where}" primary`, options);
 
   let secondaries: Backend[] = [];
   if (value.secondaries !== undefined) {
@@ -102,15 +130,43 @@ function parseRoute(value: unknown, where: string): Route {
       throw new Error(`route "${where}" "secondaries" must be an array`);
     }
     secondaries = value.secondaries.map((s, i) =>
-      parseBackend(s, `route "${where}" secondary #${i}`),
+      parseBackend(s, `route "${where}" secondary #${i}`, options),
     );
+  }
+
+  // Trace deliveries are keyed by backend id: it must be unambiguous in a route.
+  const ids = new Set<string>();
+  for (const { id } of [primary, ...secondaries]) {
+    if (id === undefined) continue;
+    if (ids.has(id)) throw new Error(`backend id "${id}" is used twice in route "${where}"`);
+    ids.add(id);
   }
 
   return { primary, secondaries };
 }
 
+/** Within a scope, a backend id names one logical CSMS: always the same URL. */
+function checkBackendIds(scope: RouteScope, label: string): void {
+  const urls = new Map<string, string>();
+  const routes = [...(scope.default ? [scope.default] : []), ...scope.chargers.values()];
+  for (const route of routes) {
+    for (const { id, url } of [route.primary, ...route.secondaries]) {
+      if (id === undefined) continue;
+      const known = urls.get(id);
+      if (known !== undefined && known !== url) {
+        throw new Error(`backend id "${id}" names different URLs in ${label}`);
+      }
+      urls.set(id, url);
+    }
+  }
+}
+
 /** Parse the `default` and `chargers` of a scope found at `path` ("" for the root). */
-function parseScope(value: Record<string, unknown>, path: string): RouteScope {
+function parseScope(
+  value: Record<string, unknown>,
+  path: string,
+  options: RouteTableOptions,
+): RouteScope {
   const chargersPath = `${path}chargers`;
   const scope: RouteScope = { chargers: new Map() };
   if (value.chargers !== undefined) {
@@ -118,11 +174,11 @@ function parseScope(value: Record<string, unknown>, path: string): RouteScope {
       throw new Error(`"${chargersPath}" must be an object keyed by chargeBoxId`);
     }
     for (const [id, route] of Object.entries(value.chargers)) {
-      scope.chargers.set(id, parseRoute(route, `${chargersPath}.${id}`));
+      scope.chargers.set(id, parseRoute(route, `${chargersPath}.${id}`, options));
     }
   }
   if (value.default !== undefined) {
-    scope.default = parseRoute(value.default, `${path}default`);
+    scope.default = parseRoute(value.default, `${path}default`, options);
   }
   return scope;
 }
@@ -142,7 +198,7 @@ function parseHostnames(value: unknown, tenantId: string): string[] {
   });
 }
 
-function parseTenants(value: unknown, table: RouteTable): void {
+function parseTenants(value: unknown, table: RouteTable, options: RouteTableOptions): void {
   if (value === undefined) return;
   if (!isPlainObject(value)) {
     throw new Error('"tenants" must be an object keyed by tenant id');
@@ -157,7 +213,8 @@ function parseTenants(value: unknown, table: RouteTable): void {
     if (!isPlainObject(tenant)) {
       throw new Error(`tenant "${tenantId}" must be an object`);
     }
-    const scope = parseScope(tenant, `tenants.${tenantId}.`);
+    const scope = parseScope(tenant, `tenants.${tenantId}.`, options);
+    checkBackendIds(scope, `tenant "${tenantId}"`);
     if (!scope.default && scope.chargers.size === 0) {
       throw new Error(`tenant "${tenantId}" must define a "default" route or at least one charger`);
     }
@@ -179,13 +236,18 @@ function parseTenants(value: unknown, table: RouteTable): void {
  * Validate and normalise an arbitrary parsed-JSON value into a RouteTable.
  * Throws with a descriptive message on any structural problem (fail-fast).
  */
-export function parseRouteTable(value: unknown): RouteTable {
+export function parseRouteTable(value: unknown, options: RouteTableOptions = {}): RouteTable {
   if (!isPlainObject(value)) {
     throw new Error("routes file must be a JSON object");
   }
 
-  const table: RouteTable = { ...parseScope(value, ""), tenants: new Map(), hostnames: new Map() };
-  parseTenants(value.tenants, table);
+  const table: RouteTable = {
+    ...parseScope(value, "", options),
+    tenants: new Map(),
+    hostnames: new Map(),
+  };
+  checkBackendIds(table, "the global routes");
+  parseTenants(value.tenants, table, options);
   if (!table.default && table.tenants.size === 0) {
     throw new Error('routes file must define a "default" route or at least one tenant');
   }
@@ -226,7 +288,7 @@ export function buildTargetUrl(backend: Backend, chargeBoxId: string): string {
  * Loads a RouteTable from disk and validates it. Throws (fail-fast) if the
  * file is missing or invalid.
  */
-export function loadRouteTable(path: string): RouteTable {
+export function loadRouteTable(path: string, options: RouteTableOptions = {}): RouteTable {
   let raw: string;
   try {
     raw = readFileSync(path, "utf8");
@@ -241,7 +303,7 @@ export function loadRouteTable(path: string): RouteTable {
     throw new Error(`routes file "${path}" is not valid JSON: ${(err as Error).message}`);
   }
 
-  return parseRouteTable(json);
+  return parseRouteTable(json, options);
 }
 
 /**
@@ -254,16 +316,18 @@ export class RouteStore {
   private table: RouteTable;
   private watcher: FSWatcher | null = null;
   private readonly path: string;
+  private readonly options: RouteTableOptions;
 
-  private constructor(path: string, table: RouteTable) {
+  private constructor(path: string, table: RouteTable, options: RouteTableOptions) {
     this.path = path;
     this.table = table;
+    this.options = options;
   }
 
-  /** Load and validate the routes file (fail-fast on error). */
-  static load(path: string): RouteStore {
+  /** Load and validate the routes file (fail-fast on error); reloads apply the same options. */
+  static load(path: string, options: RouteTableOptions = {}): RouteStore {
     const absolute = resolvePath(path);
-    return new RouteStore(absolute, loadRouteTable(absolute));
+    return new RouteStore(absolute, loadRouteTable(absolute, options), options);
   }
 
   resolve(tenantId: TenantId | null, chargeBoxId: string): Route | null {
@@ -278,7 +342,7 @@ export class RouteStore {
   /** Re-read the routes file; keep the current table if the new one is invalid. */
   reload(): void {
     try {
-      this.table = loadRouteTable(this.path);
+      this.table = loadRouteTable(this.path, this.options);
       log.info("routes reloaded", {
         path: this.path,
         chargers: this.table.chargers.size,
