@@ -189,7 +189,7 @@ export function startProxy(config: Config, routes: RouteStore, options: ProxyOpt
   });
 
   wss.on("error", (err) => {
-    log.error("WebSocket server error", { error: err.message });
+    log.error("WebSocket server error", undefined, { report: true, cause: err });
   });
 
   server.listen(config.port, config.listenHost, () => {

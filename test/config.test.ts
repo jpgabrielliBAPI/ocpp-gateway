@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { version as packageVersion } from "../package.json";
 import { loadConfig } from "../src/config";
 
 describe("loadConfig", () => {
@@ -20,6 +21,9 @@ describe("loadConfig", () => {
     "TRACE_MONGODB_DATABASE",
     "TRACE_RETENTION_DAYS",
     "TRACE_QUEUE_MAX",
+    "SENTRY_DSN",
+    "SENTRY_ENVIRONMENT",
+    "SENTRY_RELEASE",
   ] as const;
 
   beforeEach(() => {
@@ -48,6 +52,7 @@ describe("loadConfig", () => {
     expect(config.maxSessionsPerSource).toBeUndefined();
     expect(config.clientIpHeader).toBeUndefined();
     expect(config.trace).toBeUndefined();
+    expect(config.sentry).toBeUndefined();
   });
 
   it("reads the session limits", () => {
@@ -386,6 +391,53 @@ describe("loadConfig", () => {
       expect(() => loadConfig()).toThrow(
         "Invalid value for environment variable MAX_MESSAGE_BYTES: must not exceed 15728640 when TRACE_ENABLED is true",
       );
+    });
+  });
+
+  describe("error reporting", () => {
+    const dsn = "https://publickey@o1.ingest.sentry.example.com/42";
+
+    it.each(["", "  "])("is disabled by an empty SENTRY_DSN (%j)", (value) => {
+      vi.stubEnv("SENTRY_DSN", value);
+      vi.stubEnv("SENTRY_ENVIRONMENT", "production");
+
+      expect(loadConfig().sentry).toBeUndefined();
+    });
+
+    it("defaults the release to the package version", () => {
+      vi.stubEnv("SENTRY_DSN", ` ${dsn} `);
+
+      expect(loadConfig().sentry).toEqual({
+        dsn,
+        environment: undefined,
+        release: `ocpp-gateway@${packageVersion}`,
+      });
+    });
+
+    it("reads every setting", () => {
+      vi.stubEnv("SENTRY_DSN", dsn);
+      vi.stubEnv("SENTRY_ENVIRONMENT", " staging ");
+      vi.stubEnv("SENTRY_RELEASE", " ocpp-gateway@1.2.3-rc.1 ");
+
+      expect(loadConfig().sentry).toEqual({
+        dsn,
+        environment: "staging",
+        release: "ocpp-gateway@1.2.3-rc.1",
+      });
+    });
+
+    it.each([
+      "not a url",
+      "ftp://publickey@sentry.example.com/42",
+      "https://sentry.example.com/42",
+      "https://publickey@sentry.example.com/",
+    ])("rejects the invalid DSN %j without echoing it", (value) => {
+      vi.stubEnv("SENTRY_DSN", value);
+
+      expect(() => loadConfig()).toThrow(
+        "Invalid value for environment variable SENTRY_DSN: must be http(s)://<key>@<host>/<projectId>",
+      );
+      expect(() => loadConfig()).not.toThrow(/publickey/);
     });
   });
 });

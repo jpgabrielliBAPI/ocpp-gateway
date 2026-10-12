@@ -31,8 +31,8 @@
   "scripts": {
     "build": "vp pack",
     "typecheck": "tsc --noEmit",
-    "start": "node dist/index.cjs",
-    "dev": "vp pack --watch & node --watch dist/index.cjs",
+    "start": "node --enable-source-maps dist/index.cjs",
+    "dev": "vp pack --watch & node --enable-source-maps --watch dist/index.cjs",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "vp lint && vp fmt --check",
@@ -40,6 +40,7 @@
     "prepare": "husky"
   },
   "dependencies": {
+    "@sentry/node": "^11.6.0",
     "mongodb": "^7.7.0",
     "ws": "^8.22.0"
   },

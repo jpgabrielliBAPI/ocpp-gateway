@@ -1,4 +1,5 @@
 import { isIP } from "node:net";
+import { version } from "../package.json";
 import type { LoggerConfig, LogLevel } from "./logger";
 import { DEFAULT_DEBUG_MESSAGE_MAX_LENGTH, DEFAULT_LOG_LEVEL, LOG_LEVELS } from "./logger";
 import { parseHostname } from "./tenants";
@@ -9,6 +10,7 @@ import {
   parseOptionalIntegerInRange,
   parseOptionalHeaderName,
   parseOptionalPositiveInteger,
+  parseOptionalString,
   parseStringUnion,
 } from "./utils/value-parsers";
 
@@ -43,6 +45,14 @@ export interface TraceConfig {
   requireCapped: boolean;
 }
 
+/** Sentry error reporting settings; see README "Error reporting". */
+export interface SentryConfig {
+  /** Not a secret (it only allows sending events), but never echoed either. */
+  dsn: string;
+  environment?: string;
+  release: string;
+}
+
 export interface Config {
   port: number;
   /** Address or hostname the gateway listens on. Unset: all interfaces. */
@@ -75,6 +85,8 @@ export interface Config {
   clientIpHeader?: string;
   /** Trace archiving to MongoDB. Unset: disabled. */
   trace?: TraceConfig;
+  /** Error reporting to Sentry. Unset: disabled. */
+  sentry?: SentryConfig;
 }
 
 function parseOptionalHostname(value: string | undefined): string | undefined {
@@ -135,6 +147,33 @@ function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
   return config;
 }
 
+function parseOptionalSentryDsn(value: string | undefined): string | undefined {
+  const dsn = parseOptionalString(value);
+  if (dsn === undefined) return undefined;
+  // Errors never echo the DSN, like TRACE_MONGODB_URI.
+  const url = URL.parse(dsn);
+  if (
+    !url ||
+    (url.protocol !== "https:" && url.protocol !== "http:") ||
+    url.username === "" ||
+    url.pathname.replace(/\/+$/, "") === ""
+  ) {
+    throw new Error("must be http(s)://<key>@<host>/<projectId>");
+  }
+  return dsn;
+}
+
+function loadSentryConfig(): SentryConfig | undefined {
+  const dsn = parseEnv("SENTRY_DSN", parseOptionalSentryDsn);
+  if (dsn === undefined) return undefined;
+
+  return {
+    dsn,
+    environment: parseOptionalString(process.env.SENTRY_ENVIRONMENT),
+    release: parseOptionalString(process.env.SENTRY_RELEASE) ?? `ocpp-gateway@${version}`,
+  };
+}
+
 export function loadConfig(): Config {
   const routesFile = process.env.ROUTES_FILE ?? "./routes.json";
 
@@ -176,5 +215,6 @@ export function loadConfig(): Config {
     maxSessionsPerSource,
     clientIpHeader,
     trace: loadTraceConfig(maxMessageBytes),
+    sentry: loadSentryConfig(),
   };
 }

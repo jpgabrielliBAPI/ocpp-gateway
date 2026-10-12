@@ -22,3 +22,11 @@ export function redactUrl(value: string): string {
 export function maskUserinfo(text: string): string {
   return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/gi, "$1***@");
 }
+
+/** URLs within free text (an error message quoting a backend, a connection string…). */
+const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+
+/** `text` with every URL in it passed through {@link redactUrl}. */
+export function redactUrlsInText(text: string): string {
+  return text.replace(URL_IN_TEXT, (url) => redactUrl(url));
+}

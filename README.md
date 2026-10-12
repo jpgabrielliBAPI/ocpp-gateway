@@ -233,6 +233,9 @@ All configuration is done through environment variables:
 | `TRACE_RETENTION_DAYS`         | No       | `30`            | Days each trace is kept (`1`–`36500`), through a MongoDB TTL index                  |
 | `TRACE_QUEUE_MAX`              | No       | `10000`         | Traces held in memory while waiting for MongoDB (`1`–`1000000`); more are dropped   |
 | `TRACE_REQUIRE_CAPPED`         | No       | `false`         | Only write into an existing **capped** `ocpp_traces` collection; never create it. See [Trace archiving](#trace-archiving-optional) |
+| `SENTRY_DSN`                   | No       | — (disabled)    | Report crashes and internal anomalies to Sentry. See [Error reporting](#error-reporting-optional) |
+| `SENTRY_ENVIRONMENT`           | No       | —               | Sentry environment (e.g. `production`, `staging`)                                   |
+| `SENTRY_RELEASE`               | No       | `ocpp-gateway@<version>` | Sentry release                                                             |
 
 ### Message size limit
 
@@ -305,6 +308,27 @@ Set `LOG_LEVEL=debug` for OCPP payload summaries (including message-type-prefixe
 Set `LOG_DEBUG_MESSAGE_MAX_LENGTH` to a positive integer to cap logged `message` values in debug output.
 Debug output contains raw OCPP payloads (idTags, meter values…), so keep `LOG_LEVEL=debug` for troubleshooting rather than normal operation.
 Leave it unset for the default, or set it empty to disable truncation.
+
+## Error reporting (optional)
+
+Set `SENTRY_DSN` to send the gateway's own failures to [Sentry](https://sentry.io) (or any Sentry-compatible service). Unset, the Sentry SDK is not even loaded. Everything reported is still logged as before.
+
+Reported:
+
+- uncaught exceptions and unhandled promise rejections (the gateway still exits, as without Sentry);
+- startup failures once the configuration is read: an unreadable or invalid routes file, a trace archive that cannot start;
+- a routes file hot reload that fails (the previous table is kept);
+- an error of the WebSocket server (e.g. the port is already in use);
+- trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped.
+
+Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
+
+Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings and local variables are never collected, and credentials in URLs are masked before an event leaves the gateway. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
+
+Limitations:
+
+- an invalid environment variable is not reported (the DSN is read from that same configuration); the gateway exits with the error on stderr;
+- the [Cloudflare deployment](deploy/cloudflare/) does not pass `SENTRY_*` variables to the gateway.
 
 ## Trace archiving (optional)
 

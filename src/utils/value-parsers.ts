@@ -26,6 +26,12 @@ export function parseIntegerInRange(value: string, minimum: number, maximum: num
   return result;
 }
 
+/** The trimmed value; unset or blank means undefined. */
+export function parseOptionalString(value: string | undefined): string | undefined {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? undefined : trimmed;
+}
+
 /** An integer in [`minimum`, `maximum`]; unset or empty means `fallbackValue`. */
 export function parseOptionalIntegerInRange(
   value: string | undefined,

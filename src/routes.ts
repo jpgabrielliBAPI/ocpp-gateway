@@ -387,10 +387,11 @@ export class RouteStore {
         untraced: untracedScopes(this.table),
       });
     } catch (err) {
-      log.error("routes reload failed, keeping previous table", {
-        path: this.path,
-        error: (err as Error).message,
-      });
+      log.error(
+        "routes reload failed, keeping previous table",
+        { path: this.path },
+        { report: true, cause: err },
+      );
     }
   }
 

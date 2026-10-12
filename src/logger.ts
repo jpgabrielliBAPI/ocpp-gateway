@@ -1,4 +1,6 @@
+import { type ErrorReporter, noopErrorReporter } from "./error-reporter";
 import { OCPP_MSG_CALL, OCPP_MSG_CALLERROR, OCPP_MSG_CALLRESULT } from "./types";
+import { errorMessage } from "./utils/errors";
 
 export const LOG_LEVELS = ["debug", "info", "warn", "error"] as const;
 
@@ -11,6 +13,15 @@ export interface LoggerConfig {
   logLevel: LogLevel;
   debugMessageMaxLength?: number;
   sink?: LoggerSink;
+  /** Receives the errors logged with `report: true`. Unset: they are only logged. */
+  reporter?: Pick<ErrorReporter, "report">;
+}
+
+export interface ErrorLogOptions {
+  /** Also send this error to the error reporter: crashes and internal anomalies only. */
+  report?: boolean;
+  /** What was thrown: logged as `error` (its message), reported with its stack. */
+  cause?: unknown;
 }
 
 export interface LoggerSink {
@@ -28,6 +39,7 @@ const defaultLoggerSink: LoggerSink = {
 };
 
 let loggerSink: LoggerSink = defaultLoggerSink;
+let errorReporter: Pick<ErrorReporter, "report"> = noopErrorReporter;
 
 export function isLogLevel(value: string): value is LogLevel {
   return (LOG_LEVELS as readonly string[]).includes(value);
@@ -72,10 +84,11 @@ function setLoggerSink(sink: LoggerSink): void {
 }
 
 export function configureLogger(config: Partial<LoggerConfig> = {}): void {
-  const { logLevel, sink } = config;
+  const { logLevel, sink, reporter } = config;
   setLogLevel(logLevel ?? DEFAULT_LOG_LEVEL);
   setDebugMessageMaxLength(resolveDebugMessageMaxLength(config));
   setLoggerSink(sink ?? defaultLoggerSink);
+  errorReporter = reporter ?? noopErrorReporter;
 }
 
 function truncateMessage(raw: string): string {
@@ -141,6 +154,19 @@ function log(level: LogLevel, tag: string, message: string, extra?: object) {
   else loggerSink.stdout(line);
 }
 
+function report(tag: string, message: string, extra: object | undefined, cause: unknown): void {
+  try {
+    errorReporter.report({
+      tag,
+      message,
+      error: cause,
+      extra: extra as Record<string, unknown> | undefined,
+    });
+  } catch {
+    // Reporting is best-effort: the error is already logged.
+  }
+}
+
 export function createLogger(tag: string) {
   return {
     debug: (msg: string, extra?: object) => {
@@ -157,8 +183,15 @@ export function createLogger(tag: string) {
     warn: (msg: string, extra?: object) => {
       log("warn", tag, msg, extra);
     },
-    error: (msg: string, extra?: object) => {
-      log("error", tag, msg, extra);
+    error: (msg: string, extra?: object, options?: ErrorLogOptions) => {
+      const cause = options?.cause;
+      log(
+        "error",
+        tag,
+        msg,
+        cause === undefined ? extra : { ...extra, error: errorMessage(cause) },
+      );
+      if (options?.report) report(tag, msg, extra, cause);
     },
   };
 }

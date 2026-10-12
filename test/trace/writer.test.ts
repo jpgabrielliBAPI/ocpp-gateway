@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type { ErrorReport } from "../../src/error-reporter";
 import { configureLogger } from "../../src/logger";
 import type { Delivery, DeliveryStatus, TraceDocument } from "../../src/trace/record";
 import { BufferedTraceWriter, type TraceWriterOptions } from "../../src/trace/writer";
@@ -57,12 +58,15 @@ function setup(options: Partial<TraceWriterOptions> = {}) {
 }
 
 let logs: Record<string, unknown>[];
+let reports: ErrorReport[];
 
 beforeEach(() => {
   vi.useFakeTimers();
   logs = [];
+  reports = [];
   const sink = (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>);
-  configureLogger({ logLevel: "info", sink: { stdout: sink, stderr: sink } });
+  const reporter = { report: (r: ErrorReport) => reports.push(r) };
+  configureLogger({ logLevel: "info", sink: { stdout: sink, stderr: sink }, reporter });
 });
 
 afterEach(() => {
@@ -200,6 +204,75 @@ describe("BufferedTraceWriter", () => {
     writer.insert(makeDoc("a"));
     await vi.advanceTimersByTimeAsync(250);
     expect(writer.stats().dropped.writeFailed).toBe(1);
+  });
+
+  describe("error reporting", () => {
+    const reported = () => reports.map((r) => r.message);
+
+    it("reports an outage and its data loss once, however many batches are dropped", async () => {
+      const { store, writer } = setup();
+      store.failures = 6;
+      writer.insert(makeDoc("a"));
+      await vi.advanceTimersByTimeAsync(2_000);
+      writer.insert(makeDoc("b"));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(writer.stats()).toMatchObject({ dropped: { writeFailed: 2 } });
+      expect(
+        messages().filter((m) => m === "trace batch dropped after failed writes"),
+      ).toHaveLength(2);
+      expect(reported()).toEqual([
+        "trace store unavailable",
+        "trace batch dropped after failed writes",
+      ]);
+      expect(reports[0].error).toBeInstanceOf(Error);
+      expect(reports[0].tag).toBe("trace");
+      expect(reports[1].extra).toMatchObject({ count: 1, dropped: { writeFailed: 1 } });
+    });
+
+    it("reports a new outage after the store came back", async () => {
+      const { store, writer } = setup();
+      store.failures = 3;
+      writer.insert(makeDoc("a"));
+      await vi.advanceTimersByTimeAsync(2_000);
+      writer.insert(makeDoc("b"));
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(store.stored.has("b")).toBe(true);
+
+      store.failures = 3;
+      writer.insert(makeDoc("c"));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(reported()).toEqual([
+        "trace store unavailable",
+        "trace batch dropped after failed writes",
+        "trace store unavailable",
+        "trace batch dropped after failed writes",
+      ]);
+    });
+
+    it("reports dropped delivery updates as data loss", async () => {
+      const { store, writer } = setup();
+      writer.insert(makeDoc("a"));
+      await vi.advanceTimersByTimeAsync(250);
+      store.failures = 3;
+      writer.updateDelivery("a", 0, delivery("written"));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(reported()).toEqual([
+        "trace store unavailable",
+        "trace delivery updates dropped after failed writes",
+      ]);
+    });
+
+    it("does not report transient failures the retries absorb", async () => {
+      const { store, writer } = setup();
+      store.failures = 2;
+      writer.insert(makeDoc("a"));
+      await vi.advanceTimersByTimeAsync(2_000);
+
+      expect(reported()).toEqual(["trace store unavailable"]);
+    });
   });
 
   describe("bounds", () => {

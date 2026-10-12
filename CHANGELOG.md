@@ -51,11 +51,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   a tenant).
 - `docker-compose.mongo.yml`, a Compose overlay running a local MongoDB for
   trace archiving.
+- Optional error reporting to Sentry (`SENTRY_DSN`, `SENTRY_ENVIRONMENT`,
+  `SENTRY_RELEASE`): crashes, startup failures, failed routes reloads,
+  WebSocket server errors and trace archiving outages are sent as Sentry
+  events, errors only (no tracing, no logs, no request data, credentials in
+  URLs masked). Charger and CSMS connection errors stay in the logs. Disabled
+  by default; the Sentry SDK is not even loaded then.
 
 ### Changed
 
 - OCPP frames are no longer parsed for debug logging unless `LOG_LEVEL` is
   `debug`, sparing the forwarding path that work on large frames.
+- The Docker image and `npm start` run Node with `--enable-source-maps`, so
+  stack traces (in logs and in Sentry) point to the TypeScript sources.
 - On shutdown, charger sessions are torn down immediately instead of after
   each charger's close handshake, so upstream links close sooner.
 

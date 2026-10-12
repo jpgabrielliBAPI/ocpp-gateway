@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { maskUserinfo, redactUrl } from "../src/utils/url";
+import { maskUserinfo, redactUrl, redactUrlsInText } from "../src/utils/url";
 
 describe("redactUrl", () => {
   it.each([
@@ -43,6 +43,24 @@ describe("maskUserinfo", () => {
 
   it("leaves a message without credentials unchanged", () => {
     expect(maskUserinfo("connect ECONNREFUSED 127.0.0.1:27017")).toBe(
+      "connect ECONNREFUSED 127.0.0.1:27017",
+    );
+  });
+});
+
+describe("redactUrlsInText", () => {
+  it("redacts every URL in a message, leaving the rest unchanged", () => {
+    expect(
+      redactUrlsInText(
+        'cannot reach wss://user:s3cret@csms.example.com/ocpp?token=t0ken#f nor "mongodb://a:b@mongo.example.com:27017"',
+      ),
+    ).toBe(
+      'cannot reach wss://***@csms.example.com/ocpp?token=***#*** nor "mongodb://***@mongo.example.com:27017"',
+    );
+  });
+
+  it("leaves text without URLs unchanged", () => {
+    expect(redactUrlsInText("connect ECONNREFUSED 127.0.0.1:27017")).toBe(
       "connect ECONNREFUSED 127.0.0.1:27017",
     );
   });

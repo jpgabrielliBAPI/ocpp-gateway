@@ -11,6 +11,7 @@ import {
   resolveRoute,
   untracedScopes,
 } from "../src/routes";
+import { captureReports } from "./memory-reporter";
 
 const TABLE = {
   default: {
@@ -600,6 +601,30 @@ describe("trace selection per scope", () => {
         rmSync(dir, { recursive: true });
       }
     });
+  });
+});
+
+describe("RouteStore reload", () => {
+  it("reports a failed reload with what was thrown", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+    const reports = captureReports();
+    try {
+      const path = join(dir, "routes.json");
+      writeFileSync(path, JSON.stringify(TABLE));
+      const store = RouteStore.load(path);
+      writeFileSync(path, "{ not json");
+      store.reload();
+
+      expect(reports).toHaveLength(1);
+      expect(reports[0]).toMatchObject({
+        tag: "routes",
+        message: "routes reload failed, keeping previous table",
+        extra: { path },
+      });
+      expect(reports[0].error).toBeInstanceOf(Error);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
   });
 });
 

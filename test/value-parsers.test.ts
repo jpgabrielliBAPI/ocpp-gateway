@@ -9,6 +9,7 @@ import {
   parsePositiveInteger,
   parseOptionalHeaderName,
   parseOptionalPositiveInteger,
+  parseOptionalString,
   parseStringUnion,
 } from "../src/utils/value-parsers";
 
@@ -47,6 +48,17 @@ describe("parseOptionalIntegerInRange", () => {
     expect(() => parseOptionalIntegerInRange("11", 7, 1, 10)).toThrow(
       'Value must be an integer between 1 and 10: "11"',
     );
+  });
+});
+
+describe("parseOptionalString", () => {
+  it.each([
+    [undefined, undefined],
+    ["", undefined],
+    ["   ", undefined],
+    [" staging ", "staging"],
+  ])("parses %j as %j", (value, expected) => {
+    expect(parseOptionalString(value)).toBe(expected);
   });
 });
 

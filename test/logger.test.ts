@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 
+import type { ErrorReport } from "../src/error-reporter";
 import { configureLogger, createLogger } from "../src/logger";
+
+function createReporter() {
+  const reports: ErrorReport[] = [];
+  const reporter = { report: (report: ErrorReport) => reports.push(report) };
+  return { reporter, reports };
+}
 
 function parseLogEntry(line: string): Record<string, unknown> {
   const parsed: unknown = JSON.parse(line);
@@ -125,5 +132,65 @@ describe("logger", () => {
     expect(outputSink.stdoutEntries).toHaveLength(3);
     expect(outputSink.stderrEntries).toHaveLength(1);
     expect(parseLogEntry(outputSink.stderrEntries[0]).level).toBe("error");
+  });
+
+  describe("error reporting", () => {
+    it("reports an error logged with report: true, with its cause", () => {
+      const { sink, stderrEntries } = createSink();
+      const { reporter, reports } = createReporter();
+      configureLogger({ logLevel: "info", sink, reporter });
+      const cause = new Error("boom");
+
+      createLogger("trace").error(
+        "trace store unavailable",
+        { queued: 3 },
+        { report: true, cause },
+      );
+
+      expect(stderrEntries).toHaveLength(1);
+      expect(parseLogEntry(stderrEntries[0])).toMatchObject({
+        msg: "trace store unavailable",
+        queued: 3,
+      });
+      expect(reports).toEqual([
+        { tag: "trace", message: "trace store unavailable", error: cause, extra: { queued: 3 } },
+      ]);
+    });
+
+    it("does not report an error logged without report: true", () => {
+      const { sink } = createSink();
+      const { reporter, reports } = createReporter();
+      configureLogger({ logLevel: "info", sink, reporter });
+
+      createLogger("CP-001").error("charger connection error", { error: "ECONNRESET" });
+
+      expect(reports).toHaveLength(0);
+    });
+
+    it("still logs when the reporter throws", () => {
+      const { sink, stderrEntries } = createSink();
+      const reporter = {
+        report: () => {
+          throw new Error("reporter down");
+        },
+      };
+      configureLogger({ logLevel: "info", sink, reporter });
+
+      expect(() => {
+        createLogger("proxy").error("WebSocket server error", undefined, { report: true });
+      }).not.toThrow();
+      expect(stderrEntries).toHaveLength(1);
+    });
+
+    it("stops reporting once reconfigured without a reporter", () => {
+      const { sink } = createSink();
+      const { reporter, reports } = createReporter();
+      configureLogger({ logLevel: "info", sink, reporter });
+      configureLogger({ logLevel: "info", sink });
+
+      createLogger("proxy").error("WebSocket server error", undefined, { report: true });
+
+      expect(reports).toHaveLength(0);
+    });
   });
 });

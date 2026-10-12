@@ -19,4 +19,4 @@ RUN npm ci --omit=dev --ignore-scripts
 COPY --from=build /app/dist ./dist
 USER node
 EXPOSE 9000
-CMD ["node", "dist/index.cjs"]
+CMD ["node", "--enable-source-maps", "dist/index.cjs"]

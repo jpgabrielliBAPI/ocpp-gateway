@@ -1,5 +1,4 @@
 import { createLogger } from "../logger";
-import { errorMessage } from "../utils/errors";
 import { DELIVERY_STATUS_RANK, type Delivery, type TraceDocument } from "./record";
 
 const log = createLogger("trace");
@@ -127,6 +126,8 @@ export class BufferedTraceWriter implements TraceSink {
   private timer: ReturnType<typeof setTimeout> | null = null;
   private readonly statsTimer: ReturnType<typeof setInterval>;
   private storeAvailable = true;
+  /** Data loss is reported once per outage, not once per dropped batch. */
+  private dataLossReported = false;
   private queueFull = false;
   private lastLoggedStats = "";
   private readonly counters: Omit<TraceWriterStats, "queued" | "queuedBytes"> = {
@@ -325,7 +326,11 @@ export class BufferedTraceWriter implements TraceSink {
         }
       } else {
         this.counters.dropped.writeFailed += docs.length;
-        log.error("trace batch dropped after failed writes", { count: docs.length });
+        log.error(
+          "trace batch dropped after failed writes",
+          { count: docs.length, dropped: { ...this.counters.dropped } },
+          { report: this.firstDataLossOfOutage() },
+        );
       }
     } finally {
       if (!this.closed) {
@@ -346,7 +351,11 @@ export class BufferedTraceWriter implements TraceSink {
       this.counters.deliveryUpdates.applied += updates.length;
     } else {
       this.counters.deliveryUpdates.failed += updates.length;
-      log.error("trace delivery updates dropped after failed writes", { count: updates.length });
+      log.error(
+        "trace delivery updates dropped after failed writes",
+        { count: updates.length, deliveryUpdates: { ...this.counters.deliveryUpdates } },
+        { report: this.firstDataLossOfOutage() },
+      );
     }
   }
 
@@ -357,6 +366,7 @@ export class BufferedTraceWriter implements TraceSink {
         const result = await write();
         if (!this.storeAvailable) {
           this.storeAvailable = true;
+          this.dataLossReported = false;
           log.info("trace store available again", this.queueStats());
         }
         return result;
@@ -364,15 +374,18 @@ export class BufferedTraceWriter implements TraceSink {
         this.counters.writeFailures++;
         if (this.storeAvailable) {
           this.storeAvailable = false;
-          log.error("trace store unavailable", {
-            error: errorMessage(err),
-            ...this.queueStats(),
-          });
+          log.error("trace store unavailable", this.queueStats(), { report: true, cause: err });
         }
         if (attempt >= this.options.maxAttempts || this.closed) return undefined;
         await sleep(this.options.retryDelayMs * 2 ** (attempt - 1));
       }
     }
+  }
+
+  private firstDataLossOfOutage(): boolean {
+    if (this.dataLossReported) return false;
+    this.dataLossReported = true;
+    return true;
   }
 
   private queueStats() {
