@@ -324,10 +324,21 @@ export function loadRouteTable(path: string, options: RouteTableOptions = {}): R
   try {
     json = JSON.parse(raw);
   } catch (err) {
-    throw new Error(`routes file "${path}" is not valid JSON: ${(err as Error).message}`);
+    throw new Error(`routes file "${path}" is not valid JSON: ${describeJsonError(err)}`);
   }
 
   return parseRouteTable(json, options);
+}
+
+/**
+ * A JSON.parse error without the excerpt of the input V8 may quote
+ * (`Unexpected token 'x', "x{"default"... is not valid JSON`): the routes
+ * file holds backend URLs, which may carry credentials.
+ */
+function describeJsonError(err: unknown): string {
+  const message = (err as Error).message;
+  const quoted = message.indexOf('"');
+  return quoted === -1 ? message : message.slice(0, quoted).replace(/[\s,]+$/, "");
 }
 
 /**

@@ -75,6 +75,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the client keeps sending: its socket is cut once it sends more than a close
   frame, or one second after the close.
 
+### Security
+
+- A routes file with a JSON syntax error no longer has an excerpt of its
+  content quoted in the error (logged, and now reported): it may hold backend
+  credentials.
+
 ## [0.1.0] - 2026-10-06
 
 First release of **ocpp-gateway**, a fork of

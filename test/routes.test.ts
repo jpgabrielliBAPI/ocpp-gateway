@@ -628,6 +628,37 @@ describe("RouteStore reload", () => {
   });
 });
 
+describe("loadRouteTable", () => {
+  it.each([
+    'x{"default":{"primary":"wss://user:s3cret@csms.example.com/ocpp"}}',
+    '{"default":{"primary":"wss://csms.example.com/ocpp?token=s3cret"}}x',
+    '{"default":{"primary":"wss://user:s3cret@csms.example.com/ocpp"},}',
+  ])("never quotes the file content in a JSON syntax error (%#)", (content) => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+    try {
+      const path = join(dir, "routes.json");
+      writeFileSync(path, content);
+
+      expect(() => loadRouteTable(path)).toThrow(`routes file "${path}" is not valid JSON`);
+      expect(() => loadRouteTable(path)).not.toThrow(/s3cret|csms|default/);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+
+  it("keeps where the JSON syntax error is", () => {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+    try {
+      const path = join(dir, "routes.json");
+      writeFileSync(path, '{"default":{},}');
+
+      expect(() => loadRouteTable(path)).toThrow(/line 1 column 15/);
+    } finally {
+      rmSync(dir, { recursive: true });
+    }
+  });
+});
+
 describe("committed examples", () => {
   it.each(["routes.example.json", "routes.multi-tenant.example.json"])(
     "%s is a valid routing table, ready for trace archiving",
