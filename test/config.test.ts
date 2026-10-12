@@ -230,6 +230,7 @@ describe("loadConfig", () => {
         database: "ocpp_gateway",
         retentionDays: 30,
         queueMax: 10_000,
+        requireCapped: false,
       });
     });
 
@@ -239,12 +240,14 @@ describe("loadConfig", () => {
       vi.stubEnv("TRACE_MONGODB_DATABASE", "traces");
       vi.stubEnv("TRACE_RETENTION_DAYS", "7");
       vi.stubEnv("TRACE_QUEUE_MAX", "500");
+      vi.stubEnv("TRACE_REQUIRE_CAPPED", "true");
 
       expect(loadConfig().trace).toEqual({
         mongodbUri: "mongodb+srv://cluster.example.com",
         database: "traces",
         retentionDays: 7,
         queueMax: 500,
+        requireCapped: true,
       });
     });
 
@@ -268,6 +271,7 @@ describe("loadConfig", () => {
 
     it.each([
       { envName: "TRACE_ENABLED", value: "yes", expectedCause: /Invalid boolean value/ },
+      { envName: "TRACE_REQUIRE_CAPPED", value: "yes", expectedCause: /Invalid boolean value/ },
       { envName: "TRACE_MONGODB_DATABASE", value: "a/b", expectedCause: /Invalid database name/ },
       { envName: "TRACE_MONGODB_DATABASE", value: "a.b", expectedCause: /Invalid database name/ },
       {

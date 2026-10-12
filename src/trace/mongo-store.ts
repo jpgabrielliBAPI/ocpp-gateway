@@ -2,12 +2,16 @@ import {
   type AnyBulkWriteOperation,
   BSON,
   type Collection,
+  type CollectionInfo,
+  type Db,
   type IndexDescription,
   MongoBulkWriteError,
   MongoClient,
   type MongoClientOptions,
+  MongoServerError,
 } from "mongodb";
 import type { TraceConfig } from "../config";
+import { createLogger } from "../logger";
 import { errorMessage } from "../utils/errors";
 import { maskUserinfo } from "../utils/url";
 import {
@@ -23,6 +27,8 @@ import type { DeliveryUpdate, TraceStore } from "./writer";
 
 export const TRACE_COLLECTION = "ocpp_traces";
 
+const log = createLogger("trace");
+
 /**
  * MongoDB's document limit (16 MiB), minus headroom for the envelope and
  * the delivery updates applied later.
@@ -31,6 +37,7 @@ const MAX_DOCUMENT_BYTES = 16 * 1024 * 1024 - 64 * 1024;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DUPLICATE_KEY = 11000;
+const NAMESPACE_NOT_FOUND = 26;
 
 /**
  * - `expiresAt`: native TTL, MongoDB deletes expired traces in the background
@@ -140,6 +147,33 @@ export function defaultClientOptions(uri: string): MongoClientOptions {
   );
 }
 
+/**
+ * Index options that do not change which documents an index covers: `v`
+ * (format), `ns` (older servers), `collation` (inherited from a collection
+ * default; dates and numbers ignore it). Any other one, such as
+ * `partialFilterExpression`, `sparse` or `hidden`, may leave traces that never
+ * expire.
+ */
+const NEUTRAL_INDEX_OPTIONS = new Set([
+  "v",
+  "ns",
+  "key",
+  "name",
+  "expireAfterSeconds",
+  "collation",
+]);
+
+/** Whether `existing` holds `wanted`, with no option narrowing what it covers. */
+function includesIndex(existing: IndexDescription[], wanted: IndexDescription): boolean {
+  return existing.some(
+    (index) =>
+      index.name === wanted.name &&
+      JSON.stringify(index.key) === JSON.stringify(wanted.key) &&
+      index.expireAfterSeconds === wanted.expireAfterSeconds &&
+      Object.keys(index).every((option) => NEUTRAL_INDEX_OPTIONS.has(option)),
+  );
+}
+
 const STATUSES = Object.keys(DELIVERY_STATUS_RANK) as DeliveryStatus[];
 /** The statuses a delivery may still move forward from, to reach each status. */
 const EARLIER_STATUSES = Object.fromEntries(
@@ -159,11 +193,15 @@ function masked(err: unknown): Error {
  * URI, and masks credentials in every error it throws.
  */
 export class MongoTraceStore implements TraceStore {
+  private readonly db: Db;
   private readonly collection: Collection<MongoTraceDocument>;
-  private indexesReady = false;
+  private readonly requireCapped: boolean;
+  /** `missing`: the indexes were there, then vanished (the collection was dropped). */
+  private indexState: "unknown" | "ready" | "missing" = "unknown";
 
   static create(
-    config: Pick<TraceConfig, "mongodbUri" | "database" | "retentionDays">,
+    config: Pick<TraceConfig, "mongodbUri" | "database" | "retentionDays"> &
+      Partial<Pick<TraceConfig, "requireCapped">>,
     options: MongoClientOptions = {},
   ): MongoTraceStore {
     let client: MongoClient;
@@ -176,33 +214,101 @@ export class MongoTraceStore implements TraceStore {
     } catch (err) {
       throw masked(err);
     }
-    return new MongoTraceStore(client, config.database, config.retentionDays);
+    return new MongoTraceStore(client, config.database, config.retentionDays, {
+      requireCapped: config.requireCapped,
+    });
   }
 
   constructor(
     private readonly client: MongoClient,
     database: string,
     private readonly retentionDays: number,
-    collectionName = TRACE_COLLECTION,
+    {
+      collectionName = TRACE_COLLECTION,
+      requireCapped = false,
+    }: { collectionName?: string; requireCapped?: boolean } = {},
   ) {
-    this.collection = client
-      .db(database, { ignoreUndefined: true })
-      .collection<MongoTraceDocument>(collectionName);
+    this.db = client.db(database, { ignoreUndefined: true });
+    this.collection = this.db.collection<MongoTraceDocument>(collectionName);
+    this.requireCapped = requireCapped;
   }
 
+  /**
+   * Run before every batch, so that traces get a TTL even when the collection
+   * is dropped while the gateway runs (the insert would recreate it without
+   * any index): check the indexes, TTL included, and create the missing ones.
+   * A collection created by the operator (e.g. capped) is kept as is; with
+   * `requireCapped`, it must exist and be capped, and is never created. Until
+   * then every batch fails, so the writer retries then drops it.
+   *
+   * Not airtight: a drop between this check and the insert lets that batch
+   * into a collection the insert recreates, uncapped and without indexes. By
+   * default the next batch recreates the TTL index, which also expires those
+   * documents; with `requireCapped`, the next batches fail until the operator
+   * replaces that collection.
+   */
   async ensureIndexes(): Promise<void> {
+    if (this.requireCapped) await this.checkCapped();
+    if (await this.hasIndexes()) {
+      this.indexesReady();
+      return;
+    }
+    if (this.indexState === "ready") {
+      this.indexState = "missing";
+      log.warn("trace indexes missing, recreating them", {
+        collection: this.collection.collectionName,
+      });
+    }
     try {
       await this.collection.createIndexes(TRACE_INDEXES);
     } catch (err) {
       throw masked(err);
     }
-    this.indexesReady = true;
+    // Defensive: createIndexes accepts an existing index it deems equivalent.
+    if (!(await this.hasIndexes())) {
+      throw new Error(
+        `indexes of ${this.collection.collectionName} have unexpected options; drop them to let the gateway recreate them`,
+      );
+    }
+    this.indexesReady();
+  }
+
+  /** Whoever recreated them, the gateway or the operator. */
+  private indexesReady(): void {
+    if (this.indexState === "missing") {
+      log.info("trace indexes recreated", { collection: this.collection.collectionName });
+    }
+    this.indexState = "ready";
+  }
+
+  private async checkCapped(): Promise<void> {
+    const name = this.collection.collectionName;
+    let info: CollectionInfo | undefined;
+    try {
+      [info] = await this.db.listCollections({ name }, { nameOnly: false }).toArray();
+    } catch (err) {
+      throw masked(err);
+    }
+    if (!info?.options?.capped) {
+      throw new Error(
+        `collection ${name} is ${info ? "not capped" : "missing"}: TRACE_REQUIRE_CAPPED needs a capped collection, created by the operator`,
+      );
+    }
+  }
+
+  private async hasIndexes(): Promise<boolean> {
+    let existing: IndexDescription[];
+    try {
+      existing = await this.collection.indexes();
+    } catch (err) {
+      if (err instanceof MongoServerError && err.code === NAMESPACE_NOT_FOUND) return false;
+      throw masked(err);
+    }
+    return TRACE_INDEXES.every((wanted) => includesIndex(existing, wanted));
   }
 
   async insertMany(docs: TraceDocument[]): Promise<{ rejected: { id: string; reason: string }[] }> {
-    // Never store a trace that would not expire: until the indexes (TTL
-    // included) exist, every batch fails, so the writer retries then drops it.
-    if (!this.indexesReady) await this.ensureIndexes();
+    await this.ensureIndexes();
 
     const rejected: { id: string; reason: string }[] = [];
     const mongoDocs: MongoTraceDocument[] = [];

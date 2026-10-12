@@ -16,10 +16,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   v1.1 record, with its tenant, gateway session, source, each destination's
   delivery outcome (queued, submitted, written, failed, dropped) and the CALL
   it answers. Traces expire through a MongoDB TTL index; nothing is written
-  while that index cannot be created. Archiving never
+  while that index cannot be created, and it is recreated before the next
+  write if the collection is dropped while the gateway runs (a collection
+  created beforehand, e.g. capped, is kept; a drop racing a write can still
+  let one batch in before the index is back). Archiving never
   delays forwarding: writes are batched in the background, bounded in memory,
   and dropped (counted and logged) when MongoDB is unavailable. Disabled by
   default; the MongoDB driver is not even loaded then.
+- `TRACE_REQUIRE_CAPPED` (off by default): only write traces into an existing
+  capped `ocpp_traces` collection, created by the operator, and never create
+  it, so that a dropped collection stops archiving instead of coming back
+  uncapped. Required wherever that cap is what bounds the archive's disk usage.
 - Backends accept a stable `id` (`{ "id": "csms-a", "url": "…" }`), naming the
   logical CSMS in traces instead of its URL. Required on every backend when
   trace archiving is enabled; validated whenever present (format, unique within

@@ -38,6 +38,7 @@ export async function openTraceArchive(config: TraceConfig): Promise<TraceArchiv
     collection: mongo.TRACE_COLLECTION,
     retentionDays: config.retentionDays,
     queueMax: config.queueMax,
+    requireCapped: config.requireCapped,
   });
 
   let closing: Promise<void> | undefined;

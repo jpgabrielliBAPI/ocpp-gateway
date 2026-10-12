@@ -39,6 +39,8 @@ export interface TraceConfig {
   retentionDays: number;
   /** Trace documents buffered in memory while waiting for MongoDB; more are dropped. */
   queueMax: number;
+  /** Only write into an existing capped collection; never create it. */
+  requireCapped: boolean;
 }
 
 export interface Config {
@@ -111,6 +113,7 @@ function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
     queueMax: parseEnv("TRACE_QUEUE_MAX", (value) =>
       parseOptionalIntegerInRange(value, DEFAULT_TRACE_QUEUE_MAX, 1, 1_000_000),
     ),
+    requireCapped: parseEnv("TRACE_REQUIRE_CAPPED", (value) => parseBoolean(value, false)),
   };
   if (maxMessageBytes > TRACE_MAX_MESSAGE_BYTES) {
     throw new Error(
