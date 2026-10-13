@@ -265,6 +265,34 @@ describe("BufferedTraceWriter", () => {
       ]);
     });
 
+    it("reports a saturated queue once per episode, again after it recovered", async () => {
+      const { store, writer } = setup({ maxQueue: 2 });
+      let release = () => {};
+      store.gate = new Promise((resolve) => (release = resolve));
+      writer.insert(makeDoc("a"));
+      writer.insert(makeDoc("b"));
+      for (let i = 0; i < 50; i++) writer.insert(makeDoc(`refused-${i}`));
+      await vi.advanceTimersByTimeAsync(250);
+      for (let i = 50; i < 100; i++) writer.insert(makeDoc(`refused-${i}`));
+
+      expect(writer.stats()).toMatchObject({ dropped: { queueFull: 100 } });
+      expect(reported()).toEqual(["trace queue full, dropping new traces"]);
+      expect(reports[0].extra).toMatchObject({ queued: 2, maxQueue: 2 });
+
+      store.gate = null;
+      release();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(writer.stats().queued).toBe(0);
+      writer.insert(makeDoc("c"));
+      writer.insert(makeDoc("d"));
+      writer.insert(makeDoc("refused-again"));
+
+      expect(reported()).toEqual([
+        "trace queue full, dropping new traces",
+        "trace queue full, dropping new traces",
+      ]);
+    });
+
     it("does not report transient failures the retries absorb", async () => {
       const { store, writer } = setup();
       store.failures = 2;

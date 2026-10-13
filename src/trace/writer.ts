@@ -163,7 +163,9 @@ export class BufferedTraceWriter implements TraceSink {
       this.counters.dropped.queueFull++;
       if (!this.queueFull) {
         this.queueFull = true;
-        log.warn("trace queue full, dropping new traces", this.queueStats());
+        // Reported once per saturation episode: it ends once a written batch
+        // brings the queue back under its length.
+        log.error("trace queue full, dropping new traces", this.queueStats(), { report: true });
       }
       return false;
     }
