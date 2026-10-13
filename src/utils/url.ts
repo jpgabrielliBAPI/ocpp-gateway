@@ -25,8 +25,16 @@ export function maskUserinfo(text: string): string {
 
 /** URLs within free text (an error message quoting a backend, a connection string…). */
 const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
+/**
+ * The userinfo of a URL within free text, up to its last `@`: it may hold
+ * characters that end {@link URL_IN_TEXT} (`"`, `'`, `<`, `>`) or an `@`.
+ */
+const USERINFO_IN_TEXT = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi;
 
-/** `text` with every URL in it passed through {@link redactUrl}. */
+/**
+ * `text` with every URL in it passed through {@link redactUrl}, its userinfo
+ * masked first whatever characters it holds.
+ */
 export function redactUrlsInText(text: string): string {
-  return text.replace(URL_IN_TEXT, (url) => redactUrl(url));
+  return text.replace(USERINFO_IN_TEXT, "$1***@").replace(URL_IN_TEXT, (url) => redactUrl(url));
 }

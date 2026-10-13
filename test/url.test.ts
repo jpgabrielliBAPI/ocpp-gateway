@@ -59,6 +59,18 @@ describe("redactUrlsInText", () => {
     );
   });
 
+  it.each(['"', "'", "<", ">"])(
+    "masks the whole userinfo even when the password holds a %s",
+    (char) => {
+      const redacted = redactUrlsInText(
+        `cannot reach wss://user:pa${char}ss@csms.example.com/ocpp?token=t0ken`,
+      );
+
+      expect(redacted).not.toMatch(/pa|ss@|t0ken/);
+      expect(redacted).toContain("***@csms.example.com");
+    },
+  );
+
   it("leaves text without URLs unchanged", () => {
     expect(redactUrlsInText("connect ECONNREFUSED 127.0.0.1:27017")).toBe(
       "connect ECONNREFUSED 127.0.0.1:27017",
