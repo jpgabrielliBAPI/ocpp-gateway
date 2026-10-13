@@ -40,5 +40,6 @@ function expandIpv6(address: string): number[] {
   const left = parse(head);
   const right = parse(tail);
   if (tail === undefined) return left;
-  return [...left, ...new Array<number>(8 - left.length - right.length).fill(0), ...right];
+  const zeros = Array.from({ length: 8 - left.length - right.length }, () => 0);
+  return [...left, ...zeros, ...right];
 }
