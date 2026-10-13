@@ -29,6 +29,9 @@ export function openSentryReporter(
       databaseQueryData: false,
       queues: false,
       stackFrameVariables: false,
+      frameContextLines: 0,
+      genAI: { inputs: false, outputs: false },
+      graphQL: { document: false, variables: false },
     },
     // No default integrations: the http one would record breadcrumbs of every
     // CSMS upgrade (URLs may carry credentials) and a session per request.
@@ -54,7 +57,13 @@ export function openSentryReporter(
         if (error instanceof Error) {
           Sentry.captureException(error, { ...context, extra: { log: message, ...extra } });
         } else {
-          Sentry.captureMessage(message, { ...context, extra, fingerprint: [tag, message] });
+          // A thrown string or object has no stack, but is kept: it says what failed.
+          const withCause = error === undefined ? extra : { ...extra, cause: error };
+          Sentry.captureMessage(message, {
+            ...context,
+            extra: withCause,
+            fingerprint: [tag, message],
+          });
         }
       } catch {
         // Reporting is best-effort: the error is already logged.

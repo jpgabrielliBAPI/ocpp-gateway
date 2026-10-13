@@ -63,6 +63,12 @@ describe("openSentryReporter", () => {
       exception: { values: [{ type: "Error", value: "connect ECONNREFUSED" }] },
     });
     expect(events[0].breadcrumbs ?? []).toEqual([]);
+    // Neither source lines (they may quote credentials) nor local variables.
+    const frames = JSON.stringify(events[0].exception);
+    expect(frames).toContain('"frames"');
+    expect(frames).not.toMatch(/"(pre_context|context_line|post_context|vars)"/);
+    expect(events[0]).not.toHaveProperty("user");
+    expect(events[0]).not.toHaveProperty("request");
   });
 
   it("sends a report without an error as a message grouped by component and message", async () => {
@@ -77,6 +83,27 @@ describe("openSentryReporter", () => {
       level: "error",
       message: "trace batch dropped after failed writes",
       fingerprint: ["trace", "trace batch dropped after failed writes"],
+    });
+  });
+
+  it.each([
+    ["a string", "connection lost", "connection lost"],
+    [
+      "an object",
+      { code: "E_STORE", url: "wss://u:s3cret@csms.example.com" },
+      { code: "E_STORE", url: "wss://***@csms.example.com/" },
+    ],
+  ])("keeps a thrown value that is not an Error (%s) as the cause", async (_, thrown, sent) => {
+    const { events, transport } = recordingTransport();
+    reporter = openSentryReporter(CONFIG, { transport });
+
+    reporter.report({ tag: "trace", message: "trace store unavailable", error: thrown });
+    await reporter.close(1_000);
+
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      message: "trace store unavailable",
+      extra: { cause: sent },
     });
   });
 
