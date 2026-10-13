@@ -127,6 +127,9 @@ export function startProxy(config: Config, routes: RouteStore, options: ProxyOpt
     const key: SessionKey = { tenantId, chargeBoxId: chargePointId };
     const protocol = ws.protocol;
     const authHeader = req.headers.authorization;
+    // Decided once per session, like its route: a reload only affects new connections.
+    const traceSink =
+      options.traceSink && routes.isTraced(tenantId) ? options.traceSink : undefined;
 
     // Replace this charger's stale session, if any: some CSMS reject a new
     // connection while the old one is still open, forcing a reconnect loop.
@@ -154,6 +157,7 @@ export function startProxy(config: Config, routes: RouteStore, options: ProxyOpt
       ip: address,
       primary: redactUrl(route.primary.url),
       secondaries: route.secondaries.map((backend) => redactUrl(backend.url)),
+      ...(options.traceSink && { traced: traceSink !== undefined }),
     });
     if (replaced > 0) log.info("replaced existing session", { tenantId, chargePointId, replaced });
     if (kept > 0) {
@@ -177,7 +181,7 @@ export function startProxy(config: Config, routes: RouteStore, options: ProxyOpt
         sessions.remove(key, conn);
         lease.release();
       },
-      options.traceSink,
+      traceSink,
       () => lease.primaryOpened(),
     );
     leases.set(conn, lease);
@@ -201,6 +205,7 @@ export function startProxy(config: Config, routes: RouteStore, options: ProxyOpt
       maxSessionsPerSource: config.maxSessionsPerSource,
       clientIpHeader: config.clientIpHeader ?? "none (socket address)",
       traceArchiving: options.traceSink !== undefined,
+      ...(options.traceSink && { untraced: routes.untracedScopes() }),
     });
   });
 

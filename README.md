@@ -115,6 +115,7 @@ Add a `tenants` map to the routes file (see [`routes.multi-tenant.example.json`]
 - A tenant has its own `default` and/or `chargers` (at least one of them). A tenant **never falls back** to the global routes: a charger with no match in its tenant is rejected.
 - `hostnames` (optional) lists custom domains that select the tenant, e.g. `ocpp.customer-b.example`. A hostname may belong to one tenant only.
 - With `tenants`, the global `default` becomes optional.
+- `trace: false` (optional) keeps the tenant's frames out of the trace archive; see [Choosing what is archived](#choosing-what-is-archived).
 
 **Tenant resolution**, from the connection's hostname (lowercased, port and trailing dot ignored):
 
@@ -319,6 +320,26 @@ ROUTES_FILE=./routes.json npm start
 To try it locally, `docker compose -f docker-compose.yml -f docker-compose.mongo.yml up --build` runs the gateway with a MongoDB reachable only from the Compose network.
 
 **Backend ids are required.** A trace names each CSMS by its backend `id` (see [Routing configuration](#routing-configuration)), never by its URL. With archiving enabled, the gateway refuses to start if a backend has no `id`, and a hot reload that removes one is rejected (the previous table stays in effect). A session keeps the ids of the route it connected with.
+
+### Choosing what is archived
+
+Every scope is archived by default. Set `"trace": false` on a tenant to relay its chargers exactly as before but keep their frames out of the archive — e.g. a public demo tenant, where anyone can connect a charger and so controls the write volume:
+
+```json
+{
+  "default": { "primary": { "id": "csms", "url": "wss://csms.example.com/ocpp" } },
+  "tenants": {
+    "tenant-a": { "default": { "primary": { "id": "csms-a", "url": "wss://csms-a.example.com/ocpp" } } },
+    "demo": { "trace": false, "default": { "primary": { "id": "csms-demo", "url": "wss://demo.example.com/ocpp" } } }
+  }
+}
+```
+
+- At the root of the routes file, `"trace": false` excludes the **global scope only** — connections that resolve no tenant. It never applies to the tenants, which keep their own setting (default `true`).
+- The choice is made when a charger connects, like its route: an excluded session does no archiving work at all (its frames are not even parsed). A change of the routes file applies to new connections; a session already open keeps archiving, or not, until it reconnects — restart the gateway to apply it at once.
+- Backend ids are still required in every scope while `TRACE_ENABLED=true`, so a reload can re-enable a scope at any time.
+- Without `TRACE_ENABLED=true`, `trace` has no effect.
+- The `proxy listening` and `routes reloaded` log lines list the excluded scopes in `untraced` (`null` for the global scope), and `charger connected` tells whether that session is archived (`traced`).
 
 ### What is stored
 

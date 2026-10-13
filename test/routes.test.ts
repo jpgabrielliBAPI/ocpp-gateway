@@ -5,9 +5,11 @@ import { describe, expect, it } from "vitest";
 import {
   RouteStore,
   buildTargetUrl,
+  isTraced,
   loadRouteTable,
   parseRouteTable,
   resolveRoute,
+  untracedScopes,
 } from "../src/routes";
 
 const TABLE = {
@@ -528,6 +530,76 @@ describe("RouteStore with required backend ids", () => {
     } finally {
       rmSync(dir, { recursive: true });
     }
+  });
+});
+
+describe("trace selection per scope", () => {
+  const scoped = (root: object = {}, demo: object = {}) => ({
+    default: { primary: "wss://csms.example.com/ocpp" },
+    ...root,
+    tenants: {
+      "tenant-a": { default: { primary: "wss://csms-a.example.com/ocpp" } },
+      demo: { default: { primary: "wss://demo.example.com/ocpp" }, ...demo },
+    },
+  });
+
+  it("traces every scope by default", () => {
+    const table = parseRouteTable(scoped());
+    expect(isTraced(table, null)).toBe(true);
+    expect(isTraced(table, "tenant-a")).toBe(true);
+    expect(isTraced(table, "demo")).toBe(true);
+    expect(untracedScopes(table)).toEqual([]);
+  });
+
+  it("excludes only the tenant with trace: false", () => {
+    const table = parseRouteTable(scoped({}, { trace: false }));
+    expect(isTraced(table, "demo")).toBe(false);
+    expect(isTraced(table, "tenant-a")).toBe(true);
+    expect(isTraced(table, null)).toBe(true);
+    expect(untracedScopes(table)).toEqual(["demo"]);
+  });
+
+  it("applies a root trace: false to the global scope only, never to tenants", () => {
+    const table = parseRouteTable(scoped({ trace: false }));
+    expect(isTraced(table, null)).toBe(false);
+    expect(isTraced(table, "tenant-a")).toBe(true);
+    expect(isTraced(table, "demo")).toBe(true);
+    expect(untracedScopes(table)).toEqual([null]);
+  });
+
+  it("accepts an explicit trace: true", () => {
+    const table = parseRouteTable(scoped({ trace: true }, { trace: true }));
+    expect(untracedScopes(table)).toEqual([]);
+  });
+
+  it.each([["false"], [0], [null]])("rejects a non-boolean trace (%j)", (value) => {
+    expect(() => parseRouteTable(scoped({ trace: value }))).toThrow(/"trace" must be a boolean/);
+    expect(() => parseRouteTable(scoped({}, { trace: value }))).toThrow(
+      /"tenants.demo.trace" must be a boolean/,
+    );
+  });
+
+  describe("RouteStore", () => {
+    it("follows a reload, and keeps the previous selection when the reload is invalid", () => {
+      const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-routes-"));
+      try {
+        const path = join(dir, "routes.json");
+        writeFileSync(path, JSON.stringify(scoped()));
+        const store = RouteStore.load(path);
+        expect(store.isTraced("demo")).toBe(true);
+
+        writeFileSync(path, JSON.stringify(scoped({}, { trace: false })));
+        store.reload();
+        expect(store.isTraced("demo")).toBe(false);
+        expect(store.untracedScopes()).toEqual(["demo"]);
+
+        writeFileSync(path, JSON.stringify(scoped({}, { trace: "yes" })));
+        store.reload();
+        expect(store.isTraced("demo")).toBe(false);
+      } finally {
+        rmSync(dir, { recursive: true });
+      }
+    });
   });
 });
 

@@ -120,8 +120,12 @@ function buildOcppFrameDebugExtra(payload: string, extra?: object): object | und
   };
 }
 
+function isEnabled(level: LogLevel): boolean {
+  return LEVEL_WEIGHT[level] >= LEVEL_WEIGHT[minLevel];
+}
+
 function log(level: LogLevel, tag: string, message: string, extra?: object) {
-  if (LEVEL_WEIGHT[level] < LEVEL_WEIGHT[minLevel]) return;
+  if (!isEnabled(level)) return;
 
   const entry: Record<string, unknown> = {
     time: new Date().toISOString(),
@@ -143,6 +147,8 @@ export function createLogger(tag: string) {
       log("debug", tag, msg, extra);
     },
     debugOcppFrame: (msg: string, payload: string, extra?: object) => {
+      // Summarising parses the frame: skip it on the forwarding path unless debug is on.
+      if (!isEnabled("debug")) return;
       log("debug", tag, msg, buildOcppFrameDebugExtra(payload, extra));
     },
     info: (msg: string, extra?: object) => {

@@ -47,6 +47,8 @@ export interface Route {
 export interface RouteScope {
   default?: Route;
   chargers: Map<string, Route>;
+  /** Whether trace archiving (when enabled) records this scope's sessions. Default: true. */
+  trace: boolean;
 }
 
 /**
@@ -170,7 +172,11 @@ function parseScope(
   options: RouteTableOptions,
 ): RouteScope {
   const chargersPath = `${path}chargers`;
-  const scope: RouteScope = { chargers: new Map() };
+  const trace = value.trace === undefined ? true : value.trace;
+  if (typeof trace !== "boolean") {
+    throw new Error(`"${path}trace" must be a boolean`);
+  }
+  const scope: RouteScope = { chargers: new Map(), trace };
   if (value.chargers !== undefined) {
     if (!isPlainObject(value.chargers)) {
       throw new Error(`"${chargersPath}" must be an object keyed by chargeBoxId`);
@@ -273,6 +279,22 @@ export function resolveRoute(
 }
 
 /**
+ * Whether trace archiving records a session of this tenant (`null`: the
+ * global scope). Each scope has its own switch: the global one never applies
+ * to tenants.
+ */
+export function isTraced(table: RouteTable, tenantId: TenantId | null): boolean {
+  const scope = tenantId === null ? table : table.tenants.get(tenantId);
+  return scope?.trace ?? true;
+}
+
+/** The scopes excluded from trace archiving (`null`: the global scope), for logs. */
+export function untracedScopes(table: RouteTable): (TenantId | null)[] {
+  const tenants = [...table.tenants].filter(([, scope]) => !scope.trace).map(([id]) => id);
+  return table.trace ? tenants : [null, ...tenants];
+}
+
+/**
  * Build the final upstream URL for a charger. Unless the backend opts out via
  * `appendChargeBoxId: false`, the (url-encoded) chargeBoxId is appended as a
  * path segment, trailing slashes are collapsed, and query parameters are kept.
@@ -341,6 +363,14 @@ export class RouteStore {
     return resolveRoute(this.table, tenantId, chargeBoxId);
   }
 
+  isTraced(tenantId: TenantId | null): boolean {
+    return isTraced(this.table, tenantId);
+  }
+
+  untracedScopes(): (TenantId | null)[] {
+    return untracedScopes(this.table);
+  }
+
   /** The tenant that explicitly claims `hostname` (a custom domain), if any. */
   findTenantByHostname(hostname: string): TenantId | null {
     return this.table.hostnames.get(hostname) ?? null;
@@ -354,6 +384,7 @@ export class RouteStore {
         path: this.path,
         chargers: this.table.chargers.size,
         tenants: this.table.tenants.size,
+        untraced: untracedScopes(this.table),
       });
     } catch (err) {
       log.error("routes reload failed, keeping previous table", {

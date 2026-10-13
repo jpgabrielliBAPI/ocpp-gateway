@@ -1,7 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import type { AddressInfo } from "node:net";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { MongoClient } from "mongodb";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { DEFAULT_MAX_MESSAGE_BYTES } from "../src/config";
+import { configureLogger } from "../src/logger";
+import { startProxy } from "../src/proxy";
+import { RouteStore } from "../src/routes";
 import { MongoTraceStore, TRACE_COLLECTION } from "../src/trace/mongo-store";
 import type { TraceDocument } from "../src/trace/record";
 import { SessionTracer } from "../src/trace/session-tracer";
@@ -400,6 +408,210 @@ class HeldInsertsStore implements TraceStore {
     for (const resolve of this.waiting.splice(0)) resolve();
   }
 }
+
+describe("trace selection per tenant", () => {
+  const TENANTS = { tenantBaseDomain: "ocpp.example.com" };
+  const hostOf = (tenant: string | null) => ({
+    host: tenant === null ? "127.0.0.1" : `${tenant}.ocpp.example.com`,
+  });
+
+  /** Global routes plus tenants "tenant-a" and "demo", all on `csms`. */
+  function scoped(csms: Csms, root: object = {}, demo: object = {}) {
+    const route = { default: { primary: { id: "csms-main", url: csms.url() } } };
+    return {
+      ...route,
+      ...root,
+      tenants: { "tenant-a": route, demo: { ...route, ...demo } },
+    };
+  }
+
+  /** Send a BootNotification as `tenant` and wait for the CSMS answer. */
+  async function exchange(port: number, tenant: string | null, id = "m1") {
+    const { charger, received } = await connect(port, "CP-001", hostOf(tenant));
+    charger.send(boot(id));
+    await waitFor(() => received.length === 1);
+    expect(JSON.parse(received[0])).toEqual([3, id, { from: "primary" }]);
+    return { charger, received };
+  }
+
+  const tenantsOf = (sink: MemoryTraceSink) => [...new Set(sink.docs.map((d) => d.tenantId))];
+
+  it("relays an excluded tenant without archiving it, and archives a selected one", async () => {
+    const [primary] = await csmsFor(answering("primary"));
+    const sink = new MemoryTraceSink();
+    const { port } = await start(
+      scoped(primary, {}, { trace: false }),
+      { traceSink: sink },
+      TENANTS,
+    );
+
+    await exchange(port, "demo");
+    await exchange(port, "tenant-a");
+    await waitFor(() => sink.docs.length === 2);
+
+    expect(tenantsOf(sink)).toEqual(["tenant-a"]);
+    expect(sink.updates.every((u) => sink.docs.some((d) => d.id === u.id))).toBe(true);
+  });
+
+  it("archives every tenant and the global scope by default", async () => {
+    const [primary] = await csmsFor(answering("primary"));
+    const sink = new MemoryTraceSink();
+    const { port } = await start(scoped(primary), { traceSink: sink }, TENANTS);
+
+    for (const tenant of ["demo", "tenant-a", null]) await exchange(port, tenant);
+    await waitFor(() => sink.docs.length === 6);
+
+    expect(tenantsOf(sink)).toEqual(["demo", "tenant-a", null]);
+  });
+
+  it("excludes connections without a tenant with a root trace: false, tenants still archived", async () => {
+    const [primary] = await csmsFor(answering("primary"));
+    const sink = new MemoryTraceSink();
+    const { port } = await start(scoped(primary, { trace: false }), { traceSink: sink }, TENANTS);
+
+    await exchange(port, null);
+    await exchange(port, "demo");
+    await waitFor(() => sink.docs.length === 2);
+
+    expect(tenantsOf(sink)).toEqual(["demo"]);
+  });
+
+  it("logs the excluded scopes at startup and whether each connection is archived", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const capture = (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>);
+    configureLogger({ logLevel: "info", sink: { stdout: capture, stderr: capture } });
+    const [primary] = await csmsFor(answering("primary"));
+    const { port } = await start(
+      scoped(primary, { trace: false }, { trace: false }),
+      { traceSink: new MemoryTraceSink() },
+      TENANTS,
+    );
+    await exchange(port, "demo");
+    await exchange(port, "tenant-a");
+
+    expect(logs.find((l) => l.msg === "proxy listening")).toMatchObject({
+      traceArchiving: true,
+      untraced: [null, "demo"],
+    });
+    const connected = logs.filter((l) => l.msg === "charger connected");
+    expect(connected.map(({ tenantId, traced }) => ({ tenantId, traced }))).toEqual([
+      { tenantId: "demo", traced: false },
+      { tenantId: "tenant-a", traced: true },
+    ]);
+  });
+
+  /** A gateway whose routes file stays on disk, so the test can rewrite and reload it. */
+  async function startReloadable(table: object, sink: MemoryTraceSink) {
+    const dir = mkdtempSync(join(tmpdir(), "ocpp-gateway-test-"));
+    cleanups.push(() => rmSync(dir, { recursive: true }));
+    const routesFile = join(dir, "routes.json");
+    writeFileSync(routesFile, JSON.stringify(table));
+    const store = RouteStore.load(routesFile, { requireBackendIds: true });
+    const gateway = startProxy(
+      {
+        port: 0,
+        listenHost: "127.0.0.1",
+        routesFile,
+        loggerConfig: { logLevel: "error" },
+        maxMessageBytes: DEFAULT_MAX_MESSAGE_BYTES,
+        ...TENANTS,
+      },
+      store,
+      { traceSink: sink },
+    );
+    cleanups.push(() => gateway.close());
+    await once(gateway.server, "listening");
+    const { port } = gateway.server.address() as AddressInfo;
+    const reload = (next: object) => {
+      writeFileSync(routesFile, JSON.stringify(next));
+      store.reload();
+    };
+    return { port, store, reload };
+  }
+
+  it("decides at connect time: excluding a tenant applies to new connections only", async () => {
+    const [primary] = await csmsFor(answering("primary"));
+    const sink = new MemoryTraceSink();
+    const { port, store, reload } = await startReloadable(scoped(primary), sink);
+
+    const before = await exchange(port, "demo");
+    await waitFor(() => sink.docs.length === 2);
+
+    reload(scoped(primary, {}, { trace: false }));
+    expect(store.isTraced("demo")).toBe(false);
+
+    // The open session keeps archiving…
+    before.charger.send(boot("m2"));
+    await waitFor(() => before.received.length === 2 && sink.docs.length === 4);
+    // …a new one is not archived.
+    await exchange(port, "demo", "m3");
+    const ids = sink.traces().map((t) => t.messageId);
+    expect(ids).toEqual(["m1", "m1", "m2", "m2"]);
+  });
+
+  it("decides at connect time: re-including a tenant applies to new connections only", async () => {
+    const logs: Record<string, unknown>[] = [];
+    const capture = (line: string) => logs.push(JSON.parse(line) as Record<string, unknown>);
+    configureLogger({ logLevel: "info", sink: { stdout: capture, stderr: capture } });
+    const [primary] = await csmsFor(answering("primary"));
+    const sink = new MemoryTraceSink();
+    const { port, store, reload } = await startReloadable(
+      scoped(primary, { trace: false }, { trace: false }),
+      sink,
+    );
+
+    const before = await exchange(port, "demo");
+    reload(scoped(primary, { trace: false }));
+    expect(store.isTraced("demo")).toBe(true);
+    expect(logs.filter((l) => l.msg === "routes reloaded").map((l) => l.untraced)).toEqual([
+      [null],
+    ]);
+
+    // The open session stays excluded…
+    before.charger.send(boot("m2"));
+    await waitFor(() => before.received.length === 2);
+    expect(sink.docs).toEqual([]);
+    // …a new one is archived.
+    await exchange(port, "demo", "m3");
+    await waitFor(() => sink.docs.length === 2);
+    expect(tenantsOf(sink)).toEqual(["demo"]);
+    expect(sink.traces().map((t) => t.messageId)).toEqual(["m3", "m3"]);
+  });
+
+  it("never runs the session tracer for an excluded tenant, primary nor secondary", async () => {
+    const [primary, mirror] = await csmsFor(answering("primary"), answering("mirror"));
+    const sink = new MemoryTraceSink();
+    const route = {
+      default: {
+        primary: { id: "csms-main", url: primary.url() },
+        secondaries: [{ id: "mirror-1", url: mirror.url() }],
+      },
+    };
+    const { port } = await start(
+      { tenants: { "tenant-a": route, demo: { ...route, trace: false } } },
+      { traceSink: sink },
+      TENANTS,
+    );
+    const traced = [
+      vi.spyOn(SessionTracer.prototype, "fromCharger"),
+      vi.spyOn(SessionTracer.prototype, "fromPrimary"),
+      vi.spyOn(SessionTracer.prototype, "fromSecondary"),
+    ];
+    cleanups.push(() => vi.restoreAllMocks());
+    const calls = () => traced.map((spy) => spy.mock.calls.length);
+
+    const demo = await exchange(port, "demo");
+    // The mirror received the CALL and answered it: the secondary path ran too.
+    await waitFor(() => mirror.received().length === 1);
+    await sleep(50);
+    expect(demo.received).toHaveLength(1);
+    expect(calls()).toEqual([0, 0, 0]);
+
+    // The spies do see a traced tenant.
+    await exchange(port, "tenant-a");
+    await waitFor(() => calls().every((n) => n === 1));
+  });
+});
 
 describe.skipIf(!MONGODB_URI)("trace archiving to MongoDB, end to end", { timeout: 30_000 }, () => {
   it("stores a frame replayed to a reconnecting secondary once, with its final deliveries", async () => {

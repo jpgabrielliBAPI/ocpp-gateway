@@ -1,4 +1,4 @@
-import { describe, expect, it, beforeEach } from "vitest";
+import { afterEach, describe, expect, it, beforeEach, vi } from "vitest";
 
 import { configureLogger, createLogger } from "../src/logger";
 
@@ -73,6 +73,40 @@ describe("logger", () => {
     const parsed = parseLogEntry(stdoutEntries[0]);
     expect(parsed.level).toBe("debug");
     expect(parsed.message).toBe("[OCPP CALL] (abc): " + expectedPayload);
+  });
+
+  describe("debugOcppFrame below the debug level", () => {
+    afterEach(() => {
+      vi.restoreAllMocks();
+    });
+
+    it("never parses the frame when debug is disabled", () => {
+      const { sink, stdoutEntries } = createSink();
+      configureLogger({ logLevel: "info", sink });
+      const logger = createLogger("proxy");
+      const parse = vi.spyOn(JSON, "parse");
+
+      logger.debugOcppFrame("charger -> proxy", '[2,"abc","DataTransfer",{}]', { url: "x" });
+
+      expect(parse).not.toHaveBeenCalled();
+      expect(stdoutEntries).toHaveLength(0);
+    });
+
+    it("still summarises the frame when debug is enabled", () => {
+      const { sink, stdoutEntries } = createSink();
+      configureLogger({ logLevel: "debug", sink });
+      const logger = createLogger("proxy");
+      const parse = vi.spyOn(JSON, "parse");
+
+      logger.debugOcppFrame("charger -> proxy", '[3,"abc",{}]', { url: "x" });
+
+      expect(parse).toHaveBeenCalledTimes(1);
+      expect(parseLogEntry(stdoutEntries[0])).toMatchObject({
+        level: "debug",
+        url: "x",
+        message: '[OCPP RESULT] (abc): [3,"abc",{}]',
+      });
+    });
   });
 
   it("writes logs to a provided sink", () => {

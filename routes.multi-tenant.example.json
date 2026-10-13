@@ -18,6 +18,10 @@
       "chargers": {
         "CP-001": { "primary": { "id": "csms-b", "url": "wss://csms-b.example.com/ocpp" } }
       }
+    },
+    "demo": {
+      "trace": false,
+      "default": { "primary": { "id": "csms-demo", "url": "wss://demo-csms.example.com/ocpp" } }
     }
   }
 }
