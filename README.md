@@ -318,12 +318,13 @@ Reported:
 - uncaught exceptions and unhandled promise rejections (the gateway still exits, as without Sentry);
 - startup failures once the configuration is read: an unreadable or invalid routes file, a trace archive that cannot start;
 - a routes file hot reload that fails (the previous table is kept);
-- an error of the WebSocket server (e.g. the port is already in use);
-- trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped.
+- an error of the WebSocket server, e.g. the port is already in use (the gateway then exits with code 1);
+- trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped;
+- a full trace queue dropping new traces — once per saturation episode, again once the queue has drained.
 
 Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
 
-Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings and local variables are never collected, and credentials in URLs are masked before an event leaves the gateway. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
+Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings, source lines and local variables are never collected, and credentials in URLs are masked before an event leaves the gateway. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
 
 Limitations:
 

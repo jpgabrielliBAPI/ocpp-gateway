@@ -56,7 +56,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   WebSocket server errors and trace archiving outages are sent as Sentry
   events, errors only (no tracing, no logs, no request data, credentials in
   URLs masked). Charger and CSMS connection errors stay in the logs. Disabled
-  by default; the Sentry SDK is not even loaded then.
+  by default; the Sentry SDK is not even loaded then. A full trace queue is
+  reported too, once per saturation episode, and is now logged as an error.
 
 ### Changed
 
@@ -69,6 +70,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A gateway whose port is already taken exits with code 1, instead of
+  stopping with code 0 as if it had shut down normally.
 - A connection the gateway refuses (no chargeBoxId, ambiguous host, no route,
   or now a session limit) no longer crashes the gateway when the client sends
   a malformed frame before answering the close, and no longer buffers what
