@@ -35,11 +35,16 @@ async function main() {
     });
   }
 
-  /** Log and report a startup failure, then exit once the report is sent. */
-  const fail = async (message: string, err: unknown, extra?: object): Promise<never> => {
-    log.error(message, extra, { report: true, cause: err });
+  /** Exit once pending error reports are sent. */
+  const exit = async (code: number): Promise<never> => {
     await reporter.close(ERROR_REPORT_FLUSH_TIMEOUT_MS);
-    process.exit(1);
+    process.exit(code);
+  };
+
+  /** Log and report a startup failure, then exit. */
+  const fail = (message: string, err: unknown, extra?: object): Promise<never> => {
+    log.error(message, extra, { report: true, cause: err });
+    return exit(1);
   };
 
   let routes: RouteStore;
@@ -65,6 +70,11 @@ async function main() {
   }
 
   const gateway = startProxy(config, routes, { traceSink: archive?.sink });
+  // A gateway that cannot listen (port taken…) has nothing left to run: the
+  // proxy has logged and reported the error, exit non-zero once it is sent.
+  const exitOnListenError = () => void exit(1);
+  gateway.server.once("error", exitOnListenError);
+  gateway.server.once("listening", () => gateway.server.off("error", exitOnListenError));
 
   const shutdown = () => {
     log.info("shutting down…");
