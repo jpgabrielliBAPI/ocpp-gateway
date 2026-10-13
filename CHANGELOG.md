@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Optional limits on concurrent charger sessions: `MAX_SESSIONS` (live
+  sessions), `MAX_PENDING_SESSIONS` (sessions whose primary CSMS link is still
+  connecting, where the memory goes) and `MAX_SESSIONS_PER_SOURCE` (per client
+  IP address). A connection over a limit is closed with `1013` (Try Again
+  Later) before any CSMS is dialled; unrouted chargeBoxIds still get `1008` and
+  never count; IPv6 clients are counted per /64. Rejections are logged per
+  reason and source, throttled. Unlimited when unset, as before.
+- `CLIENT_IP_HEADER` names the header a trusted reverse proxy puts the client's
+  IP address in, so per-source limits do not see the whole fleet as one source.
+  Once set, a connection where it is missing, duplicated or not a bare IP
+  address is closed with `1008`.
 - Optional trace archiving to MongoDB (`TRACE_ENABLED`, `TRACE_MONGODB_URI`,
   `TRACE_MONGODB_DATABASE`, `TRACE_RETENTION_DAYS`, `TRACE_QUEUE_MAX`). Every
   OCPP frame received from a charger, the primary or a secondary CSMS is
@@ -39,6 +50,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - On shutdown, charger sessions are torn down immediately instead of after
   each charger's close handshake, so upstream links close sooner.
+
+### Fixed
+
+- A connection the gateway refuses (no chargeBoxId, ambiguous host, no route,
+  or now a session limit) no longer crashes the gateway when the client sends
+  a malformed frame before answering the close, and no longer buffers what
+  the client keeps sending: its socket is cut once it sends more than a close
+  frame, or one second after the close.
 
 ## [0.1.0] - 2026-10-06
 

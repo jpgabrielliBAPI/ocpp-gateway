@@ -61,6 +61,18 @@ export interface Config {
    * a bigger one closes that connection with `1009`.
    */
   maxMessageBytes: number;
+  /** Live charger sessions; more are closed with `1013`. Unset: unlimited. */
+  maxSessions?: number;
+  /** Sessions whose primary CSMS link is still connecting; more are closed with `1013`. Unset: unlimited. */
+  maxPendingSessions?: number;
+  /** Live charger sessions per client source; more are closed with `1013`. Unset: unlimited. */
+  maxSessionsPerSource?: number;
+  /**
+   * Header carrying the client's IP address, set by a trusted reverse proxy in
+   * front of the gateway; a connection without exactly one is rejected. Unset:
+   * the socket's remote address is used.
+   */
+  clientIpHeader?: string;
   /** Trace archiving to MongoDB. Unset: disabled. */
   trace?: TraceConfig;
 }
@@ -143,6 +155,11 @@ export function loadConfig(): Config {
     parseOptionalIntegerInRange(value, DEFAULT_MAX_MESSAGE_BYTES, 1, MAX_MESSAGE_BYTES_UPPER_BOUND),
   );
 
+  const maxSessions = parseEnv("MAX_SESSIONS", parseOptionalPositiveInteger);
+  const maxPendingSessions = parseEnv("MAX_PENDING_SESSIONS", parseOptionalPositiveInteger);
+  const maxSessionsPerSource = parseEnv("MAX_SESSIONS_PER_SOURCE", parseOptionalPositiveInteger);
+  const clientIpHeader = parseEnv("CLIENT_IP_HEADER", parseOptionalHeaderName);
+
   return {
     port,
     listenHost,
@@ -154,6 +171,10 @@ export function loadConfig(): Config {
     tenantBaseDomain,
     tenantHostHeader,
     maxMessageBytes,
+    maxSessions,
+    maxPendingSessions,
+    maxSessionsPerSource,
+    clientIpHeader,
     trace: loadTraceConfig(maxMessageBytes),
   };
 }

@@ -697,3 +697,56 @@ describe("ChargerConnection trace capture", () => {
     expect(secondary.callbacks).toEqual([]);
   });
 });
+
+describe("ChargerConnection lifecycle hooks", () => {
+  /** A session whose `onEnd` and `onPrimaryOpen` calls are counted. */
+  function startHookedSession(primaryUrl = "ws://csms.example/ocpp") {
+    const hooks = { ended: 0, primaryOpened: 0 };
+    const charger = createMockChargerSocket();
+    const conn = new ChargerConnection(
+      charger,
+      { tenantId: null, chargeBoxId: "cp-abc" },
+      { primary: { url: primaryUrl, appendChargeBoxId: true }, secondaries: [] },
+      "ocpp1.6",
+      undefined,
+      MAX_PAYLOAD,
+      () => (hooks.ended += 1),
+      undefined,
+      () => (hooks.primaryOpened += 1),
+    );
+    return { hooks, charger, conn, primary: outbound[0] };
+  }
+
+  it("reports the primary opening once it opens, not before", () => {
+    const { hooks, primary } = startHookedSession();
+    expect(hooks.primaryOpened).toBe(0);
+
+    primary.emit("open");
+    expect(hooks).toEqual({ ended: 0, primaryOpened: 1 });
+  });
+
+  it("ends the session without reporting an open when the primary fails to connect", () => {
+    // A handshake timeout surfaces as the primary's `error` event.
+    const { hooks, primary } = startHookedSession();
+    primary.emit("error", new Error("Opening handshake has timed out"));
+
+    expect(hooks).toEqual({ ended: 1, primaryOpened: 0 });
+  });
+
+  it("ends the session once, whatever closes it", () => {
+    const { hooks, charger, conn, primary } = startHookedSession();
+    primary.emit("open");
+    charger.emit("close", 1009, Buffer.from(""));
+    primary.emit("close", 1000, Buffer.from(""));
+    conn.teardown();
+
+    expect(hooks).toEqual({ ended: 1, primaryOpened: 1 });
+  });
+
+  it("ends the session when the primary URL is refused synchronously", async () => {
+    const { hooks } = startHookedSession("ws://csms.example/ocpp#fragment");
+    await Promise.resolve();
+
+    expect(hooks).toEqual({ ended: 1, primaryOpened: 0 });
+  });
+});

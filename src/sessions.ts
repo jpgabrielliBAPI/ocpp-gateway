@@ -36,27 +36,30 @@ export class SessionRegistry<T extends { teardown(): void }> {
   private readonly sessions = new Map<string, Map<T, string | undefined>>();
 
   /**
+   * The live sessions for `key` a newcomer with `authHeader` would replace
+   * (opened with the same credentials), and how many it would keep because
+   * their credentials differ. Nothing is torn down.
+   */
+  replaceable(key: SessionKey, authHeader: string | undefined): { sessions: T[]; kept: number } {
+    const sessions: T[] = [];
+    let kept = 0;
+    for (const [session, sessionAuth] of this.sessions.get(canonical(key)) ?? []) {
+      if (sameCredentials(sessionAuth, authHeader)) sessions.push(session);
+      else kept += 1;
+    }
+    return { sessions, kept };
+  }
+
+  /**
    * Tear down the live sessions for `key` that were opened with the same
    * credentials. Returns how many were replaced and how many were kept
    * because their credentials differ.
    */
   evict(key: SessionKey, authHeader: string | undefined): { replaced: number; kept: number } {
-    const entries = this.sessions.get(canonical(key));
-    if (!entries) return { replaced: 0, kept: 0 };
-
-    let replaced = 0;
-    let kept = 0;
-    // teardown() ends the session, which calls remove() on this map: deleting
-    // the current entry while iterating a Map is well-defined (no copy needed).
-    for (const [session, sessionAuth] of entries) {
-      if (sameCredentials(sessionAuth, authHeader)) {
-        session.teardown();
-        replaced += 1;
-      } else {
-        kept += 1;
-      }
-    }
-    return { replaced, kept };
+    // teardown() calls remove(): `replaceable` returns a snapshot.
+    const { sessions, kept } = this.replaceable(key, authHeader);
+    for (const session of sessions) session.teardown();
+    return { replaced: sessions.length, kept };
   }
 
   add(key: SessionKey, authHeader: string | undefined, session: T): void {

@@ -1,6 +1,6 @@
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import type { AddressInfo } from "node:net";
+import { type AddressInfo, connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WebSocket, WebSocketServer } from "ws";
@@ -130,6 +130,10 @@ export function makeCsms(
     releaseHandshakes: () => {
       for (const accept of held.splice(0)) accept(true);
     },
+    /** Refuse the parked upgrades (`401`): the gateway's link fails to connect. */
+    rejectHandshakes: () => {
+      for (const accept of held.splice(0)) accept(false);
+    },
     address: () => (wss.address() as AddressInfo).address,
     port: () => (wss.address() as AddressInfo).port,
     url: () => `ws://127.0.0.1:${(wss.address() as AddressInfo).port}`,
@@ -194,4 +198,54 @@ export async function connectWhenOpen(
   const socket = new WebSocket(url, protocol, { headers });
   await waitForOpen(socket, timeoutMs);
   return socket;
+}
+
+/**
+ * Send a raw WebSocket upgrade for `path` (so headers can be omitted or
+ * duplicated, which the ws client cannot do) and resolve with the close code
+ * the gateway sends, or `null` if it kept the connection open. `trailer` is
+ * written right after the request, before the gateway answers.
+ */
+export async function rawUpgradeCloseCode(
+  port: number,
+  headerLines: string[],
+  path = "/CP-001",
+  trailer?: Buffer,
+): Promise<number | null> {
+  const socket = connect(port, "127.0.0.1");
+  try {
+    await once(socket, "connect");
+    const chunks: Buffer[] = [];
+    socket.on("data", (chunk: Buffer) => chunks.push(chunk));
+    socket.write(
+      [
+        `GET ${path} HTTP/1.1`,
+        ...headerLines,
+        "Upgrade: websocket",
+        "Connection: Upgrade",
+        "Sec-WebSocket-Version: 13",
+        "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
+        "",
+        "",
+      ].join("\r\n"),
+    );
+    if (trailer) socket.write(trailer);
+    // Upgrade response, then a close frame: 0x88, payload length, 2-byte code.
+    const closeFrame = () => {
+      const data = Buffer.concat(chunks);
+      const end = data.indexOf("\r\n\r\n");
+      return end === -1 ? null : data.subarray(end + 4);
+    };
+    try {
+      await waitFor(() => (closeFrame()?.length ?? 0) >= 4, 1000);
+    } catch {
+      return null; // still open: the gateway accepted the connection
+    }
+    const frame = closeFrame()!;
+    if (frame[0] !== 0x88)
+      throw new Error(`expected a close frame, got 0x${frame[0].toString(16)}`);
+    return frame.readUInt16BE(2);
+  } finally {
+    socket.destroy();
+  }
 }

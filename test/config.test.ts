@@ -11,6 +11,10 @@ describe("loadConfig", () => {
     "TENANT_BASE_DOMAIN",
     "TENANT_HOST_HEADER",
     "MAX_MESSAGE_BYTES",
+    "MAX_SESSIONS",
+    "MAX_PENDING_SESSIONS",
+    "MAX_SESSIONS_PER_SOURCE",
+    "CLIENT_IP_HEADER",
     "TRACE_ENABLED",
     "TRACE_MONGODB_URI",
     "TRACE_MONGODB_DATABASE",
@@ -39,7 +43,42 @@ describe("loadConfig", () => {
     expect(config.tenantBaseDomain).toBeUndefined();
     expect(config.tenantHostHeader).toBeUndefined();
     expect(config.maxMessageBytes).toBe(1024 * 1024);
+    expect(config.maxSessions).toBeUndefined();
+    expect(config.maxPendingSessions).toBeUndefined();
+    expect(config.maxSessionsPerSource).toBeUndefined();
+    expect(config.clientIpHeader).toBeUndefined();
     expect(config.trace).toBeUndefined();
+  });
+
+  it("reads the session limits", () => {
+    vi.stubEnv("MAX_SESSIONS", "500");
+    vi.stubEnv("MAX_PENDING_SESSIONS", " 50 ");
+    vi.stubEnv("MAX_SESSIONS_PER_SOURCE", "1");
+
+    const config = loadConfig();
+    expect(config.maxSessions).toBe(500);
+    expect(config.maxPendingSessions).toBe(50);
+    expect(config.maxSessionsPerSource).toBe(1);
+  });
+
+  it.each(["MAX_SESSIONS", "MAX_PENDING_SESSIONS", "MAX_SESSIONS_PER_SOURCE"])(
+    "treats an empty %s as unlimited",
+    (name) => {
+      vi.stubEnv(name, "  ");
+
+      const config = loadConfig();
+      expect(config.maxSessions).toBeUndefined();
+      expect(config.maxPendingSessions).toBeUndefined();
+      expect(config.maxSessionsPerSource).toBeUndefined();
+    },
+  );
+
+  it("normalises CLIENT_IP_HEADER to lowercase, empty meaning unset", () => {
+    vi.stubEnv("CLIENT_IP_HEADER", "CF-Connecting-IP");
+    expect(loadConfig().clientIpHeader).toBe("cf-connecting-ip");
+
+    vi.stubEnv("CLIENT_IP_HEADER", " ");
+    expect(loadConfig().clientIpHeader).toBeUndefined();
   });
 
   it("reads MAX_MESSAGE_BYTES", () => {
@@ -183,6 +222,56 @@ describe("loadConfig", () => {
       envName: "MAX_MESSAGE_BYTES",
       value: "2147483648",
       expectedCause: 'Value must be an integer between 1 and 2147483647: "2147483648"',
+    },
+    {
+      envName: "MAX_SESSIONS",
+      value: "0",
+      expectedCause: 'Value must be a positive integer: "0"',
+    },
+    {
+      envName: "MAX_SESSIONS",
+      value: "-1",
+      expectedCause: 'Value must be a positive integer: "-1"',
+    },
+    {
+      envName: "MAX_SESSIONS",
+      value: "abc",
+      expectedCause: 'Invalid integer: "abc"',
+    },
+    {
+      envName: "MAX_PENDING_SESSIONS",
+      value: "0",
+      expectedCause: 'Value must be a positive integer: "0"',
+    },
+    {
+      envName: "MAX_PENDING_SESSIONS",
+      value: "-1",
+      expectedCause: 'Value must be a positive integer: "-1"',
+    },
+    {
+      envName: "MAX_PENDING_SESSIONS",
+      value: "abc",
+      expectedCause: 'Invalid integer: "abc"',
+    },
+    {
+      envName: "MAX_SESSIONS_PER_SOURCE",
+      value: "0",
+      expectedCause: 'Value must be a positive integer: "0"',
+    },
+    {
+      envName: "MAX_SESSIONS_PER_SOURCE",
+      value: "-1",
+      expectedCause: 'Value must be a positive integer: "-1"',
+    },
+    {
+      envName: "MAX_SESSIONS_PER_SOURCE",
+      value: "abc",
+      expectedCause: 'Invalid integer: "abc"',
+    },
+    {
+      envName: "CLIENT_IP_HEADER",
+      value: "X Real IP",
+      expectedCause: 'Invalid HTTP header name: "X Real IP"',
     },
     {
       envName: "LOG_LEVEL",

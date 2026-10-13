@@ -1,5 +1,4 @@
 import { once } from "node:events";
-import { connect } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { WebSocket } from "ws";
 import type { Config } from "../src/config";
@@ -7,6 +6,7 @@ import {
   boot,
   connectWhenOpen,
   makeCsms,
+  rawUpgradeCloseCode as rawUpgrade,
   sleep,
   startGateway,
   waitFor,
@@ -207,44 +207,9 @@ describe("multi-tenant rejection and fallback", () => {
   });
 });
 
-/**
- * Send a raw WebSocket upgrade (so headers can be omitted or duplicated, which
- * the ws client cannot do) and resolve with the close code the gateway sends.
- */
-async function rawUpgradeCloseCode(port: number, headerLines: string[]): Promise<number | null> {
-  const socket = connect(port, "127.0.0.1");
-  cleanup.push(() => socket.destroy());
-  await once(socket, "connect");
-  const chunks: Buffer[] = [];
-  socket.on("data", (chunk: Buffer) => chunks.push(chunk));
-  socket.write(
-    [
-      "GET /CP-001 HTTP/1.1",
-      ...headerLines,
-      `Authorization: ${AUTH}`,
-      "Upgrade: websocket",
-      "Connection: Upgrade",
-      "Sec-WebSocket-Version: 13",
-      "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==",
-      "",
-      "",
-    ].join("\r\n"),
-  );
-  // Upgrade response, then a close frame: 0x88, payload length, 2-byte code.
-  const closeFrame = () => {
-    const data = Buffer.concat(chunks);
-    const end = data.indexOf("\r\n\r\n");
-    return end === -1 ? null : data.subarray(end + 4);
-  };
-  try {
-    await waitFor(() => (closeFrame()?.length ?? 0) >= 4, 1000);
-  } catch {
-    return null; // still open: the gateway accepted the connection
-  }
-  const frame = closeFrame()!;
-  expect(frame[0]).toBe(0x88);
-  return frame.readUInt16BE(2);
-}
+/** A raw upgrade of `/CP-001` with the charger's credentials (see `rawUpgrade`). */
+const rawUpgradeCloseCode = (port: number, headerLines: string[]) =>
+  rawUpgrade(port, [...headerLines, `Authorization: ${AUTH}`]);
 
 describe("ambiguous host header fails closed", () => {
   // A global default is present in every case: an ambiguous host must be

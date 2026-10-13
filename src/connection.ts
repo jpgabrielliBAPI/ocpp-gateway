@@ -85,6 +85,8 @@ export class ChargerConnection {
     private readonly maxPayload: number,
     private readonly onEnd: () => void,
     private readonly traceSink?: TraceSink,
+    /** Called once the primary link opens: the session is no longer pending. */
+    private readonly onPrimaryOpen?: () => void,
   ) {
     // Tag logs with the tenant too: two tenants may share a chargeBoxId.
     this.log = createLogger(formatSessionKey(key));
@@ -237,6 +239,7 @@ export class ChargerConnection {
 
     ws.on("open", () => {
       this.log.info("primary connected", { url: logUrl });
+      this.onPrimaryOpen?.();
       this.flushPrimaryQueue(ws);
     });
 
