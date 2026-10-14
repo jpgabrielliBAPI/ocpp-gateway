@@ -84,10 +84,51 @@ describe("redactUrlsInText", () => {
     },
   );
 
-  it("keeps the punctuation that closes a quoted URL", () => {
-    expect(redactUrlsInText("see (wss://csms.example.com/ocpp?token=t0ken).")).toBe(
-      "see (wss://csms.example.com/ocpp?token=***).",
+  it.each([",", ";", ", "])("redacts each of two URLs separated by %j", (separator) => {
+    const redacted = redactUrlsInText(
+      `wss://host.example.com/path${separator}wss://alice:s3cret@other.example.com/path`,
     );
+
+    expect(redacted).not.toMatch(/alice|s3cret/);
+    expect(redacted).toBe(
+      `wss://host.example.com/path${separator}wss://***@other.example.com/path`,
+    );
+  });
+
+  it.each([
+    // Split after the slash: the second URL is read with a "pathwss" scheme.
+    ["/pathwss://", "wss://host.example.com/pathwss://***@other.example.com/path"],
+    // No scheme can start after "1": the end of the first URL is unknown.
+    ["/path?x=1wss://", "<invalid url>"],
+  ])("never lets the credentials of a URL glued to another through (%s)", (glue, expected) => {
+    const redacted = redactUrlsInText(
+      `at wss://host.example.com${glue}alice:s3cret@other.example.com/path now`,
+    );
+
+    expect(redacted).not.toMatch(/alice|s3cret/);
+    expect(redacted).toBe(`at ${expected} now`);
+  });
+
+  it.each([
+    ["wss://csms.example.com/ocpp?token=!", "wss://csms.example.com/ocpp?token=***"],
+    ["wss://csms.example.com/ocpp?token=s3cret).", "wss://csms.example.com/ocpp?token=***"],
+    ["wss://csms.example.com/ocpp#s3cret!", "wss://csms.example.com/ocpp#***"],
+  ])("masks a query value or fragment ending in punctuation (%s)", (url, expected) => {
+    expect(redactUrlsInText(`see ${url}`)).toBe(`see ${expected}`);
+  });
+
+  it("keeps the punctuation closing a URL without query nor fragment", () => {
+    expect(redactUrlsInText("see (wss://user:s3cret@csms.example.com/ocpp).")).toBe(
+      "see (wss://***@csms.example.com/ocpp).",
+    );
+  });
+
+  it("takes linear time, even on long runs of letters or punctuation", () => {
+    const start = performance.now();
+    redactUrlsInText("a".repeat(200_000));
+    redactUrlsInText(`wss://csms.example.com/${"!".repeat(200_000)}x`);
+    redactUrlsInText("a.".repeat(100_000));
+    expect(performance.now() - start).toBeLessThan(1_000);
   });
 
   it("leaves text without URLs unchanged", () => {

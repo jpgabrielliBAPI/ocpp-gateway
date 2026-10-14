@@ -126,6 +126,29 @@ describe("openSentryReporter", () => {
     expect(sent).toContain("wss://***@csms.example.com/ocpp?token=***#***");
   });
 
+  it("masks credentials of URLs written back to back or ending in punctuation", async () => {
+    const { bodies, events, transport } = recordingTransport();
+    reporter = openSentryReporter(CONFIG, { transport });
+
+    reporter.report({
+      tag: "routes",
+      message: "failed",
+      error: new Error(
+        "cannot reach wss://a.example.com/ocpp,wss://alice:s3cret@b.example.com/ocpp?token=!",
+      ),
+      extra: { backends: "wss://a.example.com/ocpp;wss://bob:hunt3r@c.example.com/ocpp#k3y)" },
+    });
+    await reporter.close(1_000);
+
+    expect(events).toHaveLength(1);
+    const sent = bodies.join("\n");
+    expect(sent).not.toMatch(/alice|s3cret|bob|hunt3r|k3y|token=!/);
+    expect(sent).toContain(
+      "cannot reach wss://a.example.com/ocpp,wss://***@b.example.com/ocpp?token=***",
+    );
+    expect(sent).toContain("wss://a.example.com/ocpp;wss://***@c.example.com/ocpp#***");
+  });
+
   it("sends no breadcrumbs, sessions nor traces of the gateway's WebSocket traffic", async () => {
     const { bodies, itemTypes, events, transport } = recordingTransport();
     reporter = openSentryReporter(CONFIG, { transport });

@@ -24,18 +24,36 @@ export function maskUserinfo(text: string): string {
 }
 
 /**
+ * Where a URL starts within free text: a scheme not preceded by a scheme
+ * character, so each run is scanned once (linear time, whatever the text).
+ */
+const SCHEME_START = String.raw`(?<![a-z0-9+.-])[a-z][a-z0-9+.-]*:\/\/`;
+/**
  * URLs within free text (an error message quoting a backend, a connection
  * string…), up to the next whitespace: userinfo, query values and fragments
  * may hold any other character, so none may end the URL early.
  */
-const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
-/** Punctuation closing a URL in prose (brackets, quotes, end of sentence): kept as is. */
-const TRAILING_PUNCTUATION = /[)\]}>"'`.,;!]+$/;
+const URL_IN_TEXT = new RegExp(`${SCHEME_START}\\S*`, "gi");
+/** Splits URLs written back to back (`…/path,wss://…`) at each scheme. */
+const NEXT_URL = new RegExp(`(?=${SCHEME_START})`, "i");
+/** Punctuation closing a URL in prose (brackets, quotes, end of sentence). */
+const CLOSING_PUNCTUATION = new Set(")]}>\"'`.,;!");
 
 /** `text` with every URL in it passed through {@link redactUrl}. */
 export function redactUrlsInText(text: string): string {
-  return text.replace(URL_IN_TEXT, (match) => {
-    const trailing = TRAILING_PUNCTUATION.exec(match)?.[0] ?? "";
-    return redactUrl(match.slice(0, match.length - trailing.length)) + trailing;
-  });
+  return text.replace(URL_IN_TEXT, (match) => match.split(NEXT_URL).map(redactUrlInText).join(""));
+}
+
+/**
+ * One URL cut out of text. Fails closed: a URL whose end cannot be told from
+ * the next one (`…/pathwss://…`) is dropped whole, and closing punctuation is
+ * only kept as is when it cannot belong to a query value or fragment.
+ */
+function redactUrlInText(url: string): string {
+  if (url.indexOf("://", url.indexOf("://") + 3) !== -1) return "<invalid url>";
+  let end = url.length;
+  while (end > 0 && CLOSING_PUNCTUATION.has(url[end - 1])) end--;
+  const body = url.slice(0, end);
+  if (/[?#]/.test(body)) return redactUrl(url);
+  return redactUrl(body) + url.slice(end);
 }
