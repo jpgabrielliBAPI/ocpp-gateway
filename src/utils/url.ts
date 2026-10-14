@@ -23,18 +23,19 @@ export function maskUserinfo(text: string): string {
   return text.replace(/([a-z][a-z0-9+.-]*:\/\/)[^/@\s]*@/gi, "$1***@");
 }
 
-/** URLs within free text (an error message quoting a backend, a connection string…). */
-const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/[^\s"'<>]+/gi;
 /**
- * The userinfo of a URL within free text, up to its last `@`: it may hold
- * characters that end {@link URL_IN_TEXT} (`"`, `'`, `<`, `>`) or an `@`.
+ * URLs within free text (an error message quoting a backend, a connection
+ * string…), up to the next whitespace: userinfo, query values and fragments
+ * may hold any other character, so none may end the URL early.
  */
-const USERINFO_IN_TEXT = /([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi;
+const URL_IN_TEXT = /[a-z][a-z0-9+.-]*:\/\/\S+/gi;
+/** Punctuation closing a URL in prose (brackets, quotes, end of sentence): kept as is. */
+const TRAILING_PUNCTUATION = /[)\]}>"'`.,;!]+$/;
 
-/**
- * `text` with every URL in it passed through {@link redactUrl}, its userinfo
- * masked first whatever characters it holds.
- */
+/** `text` with every URL in it passed through {@link redactUrl}. */
 export function redactUrlsInText(text: string): string {
-  return text.replace(USERINFO_IN_TEXT, "$1***@").replace(URL_IN_TEXT, (url) => redactUrl(url));
+  return text.replace(URL_IN_TEXT, (match) => {
+    const trailing = TRAILING_PUNCTUATION.exec(match)?.[0] ?? "";
+    return redactUrl(match.slice(0, match.length - trailing.length)) + trailing;
+  });
 }

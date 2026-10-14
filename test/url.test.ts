@@ -71,6 +71,25 @@ describe("redactUrlsInText", () => {
     },
   );
 
+  it.each(['"', "'", "<", ">", "`"])(
+    "masks a whole query value or fragment even when it holds a %s",
+    (char) => {
+      const redacted = redactUrlsInText(
+        `cannot reach wss://csms.example.com/ocpp?token=t0k${char}en&id=1#fr${char}ag done`,
+      );
+
+      expect(redacted).not.toMatch(/t0k|en&|fr|ag /);
+      expect(redacted).toContain("wss://csms.example.com/ocpp?token=***");
+      expect(redacted).toMatch(/ done$/);
+    },
+  );
+
+  it("keeps the punctuation that closes a quoted URL", () => {
+    expect(redactUrlsInText("see (wss://csms.example.com/ocpp?token=t0ken).")).toBe(
+      "see (wss://csms.example.com/ocpp?token=***).",
+    );
+  });
+
   it("leaves text without URLs unchanged", () => {
     expect(redactUrlsInText("connect ECONNREFUSED 127.0.0.1:27017")).toBe(
       "connect ECONNREFUSED 127.0.0.1:27017",
