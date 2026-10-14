@@ -293,6 +293,39 @@ describe("BufferedTraceWriter", () => {
       ]);
     });
 
+    it("reports saturated delivery updates once per episode, again after recovery", async () => {
+      const { store, writer } = setup({ maxQueue: 2 });
+      for (const ids of [
+        ["a", "b"],
+        ["c", "d"],
+      ]) {
+        for (const id of ids) writer.insert(makeDoc(id));
+        await vi.advanceTimersByTimeAsync(250);
+      }
+      let release = () => {};
+      store.gate = new Promise((resolve) => (release = resolve));
+      writer.updateDelivery("a", 0, delivery("written"));
+      writer.updateDelivery("b", 0, delivery("written"));
+      for (let i = 0; i < 50; i++) writer.updateDelivery("c", i, delivery("written"));
+
+      expect(writer.stats()).toMatchObject({ deliveryUpdates: { dropped: 50 } });
+      expect(reported()).toEqual(["trace delivery updates queue full, dropping updates"]);
+      expect(reports[0].extra).toMatchObject({ maxQueue: 2 });
+
+      // The pending updates are taken for writing: the queue has room again.
+      await vi.advanceTimersByTimeAsync(250);
+      writer.updateDelivery("c", 0, delivery("written"));
+      writer.updateDelivery("d", 0, delivery("written"));
+      for (let i = 1; i < 50; i++) writer.updateDelivery("c", i, delivery("written"));
+
+      expect(reported()).toEqual([
+        "trace delivery updates queue full, dropping updates",
+        "trace delivery updates queue full, dropping updates",
+      ]);
+      store.gate = null;
+      release();
+    });
+
     it("does not report transient failures the retries absorb", async () => {
       const { store, writer } = setup();
       store.failures = 2;

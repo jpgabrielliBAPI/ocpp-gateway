@@ -129,6 +129,7 @@ export class BufferedTraceWriter implements TraceSink {
   /** Data loss is reported once per outage, not once per dropped batch. */
   private dataLossReported = false;
   private queueFull = false;
+  private updatesFull = false;
   private lastLoggedStats = "";
   private readonly counters: Omit<TraceWriterStats, "queued" | "queuedBytes"> = {
     accepted: 0,
@@ -196,6 +197,16 @@ export class BufferedTraceWriter implements TraceSink {
     }
     if (this.updates.size >= this.options.maxQueue) {
       this.counters.deliveryUpdates.dropped++;
+      if (!this.updatesFull) {
+        // Once per saturation episode, like documents: it ends once the
+        // pending updates are taken for writing.
+        this.updatesFull = true;
+        log.error(
+          "trace delivery updates queue full, dropping updates",
+          { pending: this.updates.size, maxQueue: this.options.maxQueue },
+          { report: true },
+        );
+      }
       return;
     }
     this.updates.set(key, { id, index, delivery });
@@ -299,6 +310,7 @@ export class BufferedTraceWriter implements TraceSink {
       if (!this.closed && this.updates.size > 0) {
         const updates = [...this.updates.values()];
         this.updates.clear();
+        this.updatesFull = false;
         await this.writeUpdates(updates);
       }
     }
