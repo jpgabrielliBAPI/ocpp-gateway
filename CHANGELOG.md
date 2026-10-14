@@ -57,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   events, errors only (no tracing, no logs, no request data, credentials in
   URLs masked). Charger and CSMS connection errors stay in the logs. Disabled
   by default; the Sentry SDK is not even loaded then. A full trace queue is
-  reported too, once per saturation episode, and is now logged as an error.
+  reported too, once per saturation episode, and is now logged as an error;
+  so is a full delivery-update queue, which used to drop outcomes silently.
 
 ### Changed
 

@@ -320,7 +320,7 @@ Reported:
 - a routes file hot reload that fails (the previous table is kept);
 - an error of the WebSocket server, e.g. the port is already in use (the gateway then exits with code 1);
 - trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped;
-- a full trace queue dropping new traces — once per saturation episode, again once the queue has drained.
+- a full trace queue dropping new traces, or a full delivery-update queue dropping delivery outcomes — once per saturation episode, again once the queue has drained.
 
 Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
 
