@@ -117,6 +117,24 @@ describe("redactUrlsInText", () => {
     expect(redactUrlsInText(`see ${url}`)).toBe(`see ${expected}`);
   });
 
+  it.each(["/", "?", "#", "\\"])(
+    "masks a password holding a %s, which the URL parser would read as the host's end",
+    (char) => {
+      const redacted = redactUrlsInText(
+        `cannot reach wss://user:123${char}s3cret@csms.example.com/ocpp now`,
+      );
+
+      expect(redacted).not.toMatch(/user|123|s3cret/);
+      expect(redacted).toBe("cannot reach wss://***@csms.example.com/ocpp now");
+    },
+  );
+
+  it("masks up to the last @ when one may be in a query value (fails closed)", () => {
+    expect(redactUrlsInText("wss://csms.example.com/ocpp?email=a@b.example.com")).toBe(
+      "wss://***@b.example.com/",
+    );
+  });
+
   it("keeps the punctuation closing a URL without query nor fragment", () => {
     expect(redactUrlsInText("see (wss://user:s3cret@csms.example.com/ocpp).")).toBe(
       "see (wss://***@csms.example.com/ocpp).",

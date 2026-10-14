@@ -136,17 +136,22 @@ describe("openSentryReporter", () => {
       error: new Error(
         "cannot reach wss://a.example.com/ocpp,wss://alice:s3cret@b.example.com/ocpp?token=!",
       ),
-      extra: { backends: "wss://a.example.com/ocpp;wss://bob:hunt3r@c.example.com/ocpp#k3y)" },
+      extra: {
+        backends: "wss://a.example.com/ocpp;wss://bob:hunt3r@c.example.com/ocpp#k3y)",
+        // The URL parser alone would read "123" as a port and keep the rest.
+        slashInPassword: "wss://carol:123/pa55@d.example.com/ocpp",
+      },
     });
     await reporter.close(1_000);
 
     expect(events).toHaveLength(1);
     const sent = bodies.join("\n");
-    expect(sent).not.toMatch(/alice|s3cret|bob|hunt3r|k3y|token=!/);
+    expect(sent).not.toMatch(/alice|s3cret|bob|hunt3r|k3y|token=!|carol|pa55/);
     expect(sent).toContain(
       "cannot reach wss://a.example.com/ocpp,wss://***@b.example.com/ocpp?token=***",
     );
     expect(sent).toContain("wss://a.example.com/ocpp;wss://***@c.example.com/ocpp#***");
+    expect(sent).toContain("wss://***@d.example.com/ocpp");
   });
 
   it("sends no breadcrumbs, sessions nor traces of the gateway's WebSocket traffic", async () => {

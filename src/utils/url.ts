@@ -46,11 +46,17 @@ export function redactUrlsInText(text: string): string {
 
 /**
  * One URL cut out of text. Fails closed: a URL whose end cannot be told from
- * the next one (`…/pathwss://…`) is dropped whole, and closing punctuation is
- * only kept as is when it cannot belong to a query value or fragment.
+ * the next one (`…/pathwss://…`) is dropped whole, everything up to its last
+ * `@` is masked as userinfo, and closing punctuation is only kept as is when
+ * it cannot belong to a query value or fragment.
  */
-function redactUrlInText(url: string): string {
-  if (url.indexOf("://", url.indexOf("://") + 3) !== -1) return "<invalid url>";
+function redactUrlInText(match: string): string {
+  const authority = match.indexOf("://") + 3;
+  if (match.indexOf("://", authority) !== -1) return "<invalid url>";
+  // Masked as text, before parsing: the URL parser reads a password holding
+  // "/", "?", "#" or "\" as the end of the host, leaving the rest unmasked.
+  const at = match.lastIndexOf("@");
+  const url = at >= authority ? `${match.slice(0, authority)}***${match.slice(at)}` : match;
   let end = url.length;
   while (end > 0 && CLOSING_PUNCTUATION.has(url[end - 1])) end--;
   const body = url.slice(0, end);
