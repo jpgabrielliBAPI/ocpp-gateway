@@ -35,8 +35,10 @@ async function main() {
     });
   }
 
-  /** Exit once pending error reports are sent. */
+  /** Exit once pending error reports are sent, waiting at most the flush budget. */
   const exit = async (code: number): Promise<never> => {
+    // A guard in case the reporter does not honour its own bound.
+    setTimeout(() => process.exit(code), ERROR_REPORT_FLUSH_TIMEOUT_MS + 500).unref();
     await reporter.close(ERROR_REPORT_FLUSH_TIMEOUT_MS);
     process.exit(code);
   };
@@ -79,20 +81,18 @@ async function main() {
   const shutdown = () => {
     log.info("shutting down…");
     routes.close();
+    // A shutdown that hangs is forced, still sending pending error reports.
     setTimeout(
-      () => process.exit(1),
-      SHUTDOWN_TIMEOUT_MS +
-        (archive ? TRACE_FLUSH_TIMEOUT_MS : 0) +
-        (config.sentry ? ERROR_REPORT_FLUSH_TIMEOUT_MS : 0),
+      () => void exit(1),
+      SHUTDOWN_TIMEOUT_MS + (archive ? TRACE_FLUSH_TIMEOUT_MS : 0),
     ).unref();
     // close() ends every session synchronously, so their last trace outcomes
     // are already reported when the archive starts flushing. A repeated
     // signal waits for that same flush (archive.close() and reporter.close()
-    // are idempotent). Errors reported while closing are sent last.
+    // are idempotent). Errors reported while closing are sent last, even if
+    // a close fails.
     const closing = gateway.close();
-    void Promise.all([closing, archive?.close()])
-      .then(() => reporter.close(ERROR_REPORT_FLUSH_TIMEOUT_MS))
-      .then(() => process.exit(0));
+    void Promise.allSettled([closing, archive?.close()]).then(() => exit(0));
   };
 
   process.on("SIGINT", shutdown);

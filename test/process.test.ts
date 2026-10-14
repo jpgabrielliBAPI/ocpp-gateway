@@ -176,6 +176,59 @@ describe("gateway process with Sentry enabled", () => {
   );
 
   it(
+    "still sends what is pending when a shutdown hangs and is forced",
+    async () => {
+      // A request whose headers never end keeps server.close() waiting, so
+      // the shutdown is forced. The very timer that forces it first makes a
+      // routes reload fail (through the watcher's own callback), so an error
+      // is reported right before the exit.
+      const preload = `
+        const fs = require("node:fs");
+        const http = require("node:http");
+        const net = require("node:net");
+        let reload = () => {};
+        const watch = fs.watch;
+        fs.watch = (path, options, listener) => {
+          reload = listener;
+          return watch(path, options, listener);
+        };
+        const createServer = http.createServer;
+        http.createServer = (...args) => {
+          const server = createServer(...args);
+          server.once("listening", () => {
+            const socket = net.connect(server.address().port, "127.0.0.1");
+            socket.write("GET /healthz HTTP/1.1\\r\\nHost: x\\r\\n");
+          });
+          return server;
+        };
+        process.on("SIGTERM", () => {
+          const schedule = globalThis.setTimeout;
+          globalThis.setTimeout = (fn, ms, ...rest) =>
+            schedule(
+              ms >= 5_000
+                ? () => {
+                    fs.writeFileSync(process.env.ROUTES_FILE, "{ not json");
+                    reload();
+                    fn();
+                  }
+                : fn,
+              ms,
+              ...rest,
+            );
+        });
+      `;
+      const { proc, exited, logged } = startGateway({ PORT: String(await freePort()) }, preload);
+      await logged("proxy listening");
+
+      proc.kill("SIGTERM");
+
+      expect(await exited).toBe(1);
+      expect(ingest.events.map((e) => e.tags?.component)).toContain("routes");
+    },
+    TIMEOUT_MS,
+  );
+
+  it(
     "sends what is pending before a graceful shutdown exits",
     async () => {
       const { proc, exited, logged } = startGateway({ PORT: String(await freePort()) });
