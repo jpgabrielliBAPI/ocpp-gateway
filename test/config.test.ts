@@ -414,6 +414,15 @@ describe("loadConfig", () => {
       });
     });
 
+    it.each([
+      "http://publickey:secretkey@sentry.example.com:9000/prefix/42",
+      "https://public_key_1@[::1]/7",
+    ])("accepts the DSN %j", (value) => {
+      vi.stubEnv("SENTRY_DSN", value);
+
+      expect(loadConfig().sentry?.dsn).toBe(value);
+    });
+
     it("reads every setting", () => {
       vi.stubEnv("SENTRY_DSN", dsn);
       vi.stubEnv("SENTRY_ENVIRONMENT", " staging ");
@@ -431,11 +440,15 @@ describe("loadConfig", () => {
       "ftp://publickey@sentry.example.com/42",
       "https://sentry.example.com/42",
       "https://publickey@sentry.example.com/",
+      "https://publickey@sentry.example.com/my-project",
+      "https://publickey@sentry.example.com/42/extra",
+      "https://publickey@sentry.example.com/42/",
+      "https://public-key@sentry.example.com/42",
     ])("rejects the invalid DSN %j without echoing it", (value) => {
       vi.stubEnv("SENTRY_DSN", value);
 
       expect(() => loadConfig()).toThrow(
-        "Invalid value for environment variable SENTRY_DSN: must be http(s)://<key>@<host>/<projectId>",
+        "Invalid value for environment variable SENTRY_DSN: must be http(s)://<key>@<host>/<numeric projectId>",
       );
       expect(() => loadConfig()).not.toThrow(/publickey/);
     });

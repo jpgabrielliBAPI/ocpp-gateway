@@ -150,15 +150,16 @@ function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
 function parseOptionalSentryDsn(value: string | undefined): string | undefined {
   const dsn = parseOptionalString(value);
   if (dsn === undefined) return undefined;
-  // Errors never echo the DSN, like TRACE_MONGODB_URI.
+  // Errors never echo the DSN, like TRACE_MONGODB_URI. The checks are the
+  // SDK's own: it would silently drop a DSN failing them.
   const url = URL.parse(dsn);
   if (
     !url ||
     (url.protocol !== "https:" && url.protocol !== "http:") ||
-    url.username === "" ||
-    url.pathname.replace(/\/+$/, "") === ""
+    !/^\w+$/.test(url.username) ||
+    !/^\d+$/.test(url.pathname.split("/").pop() ?? "")
   ) {
-    throw new Error("must be http(s)://<key>@<host>/<projectId>");
+    throw new Error("must be http(s)://<key>@<host>/<numeric projectId>");
   }
   return dsn;
 }
