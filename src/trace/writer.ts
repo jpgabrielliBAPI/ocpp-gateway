@@ -198,8 +198,8 @@ export class BufferedTraceWriter implements TraceSink {
     if (this.updates.size >= this.options.maxQueue) {
       this.counters.deliveryUpdates.dropped++;
       if (!this.updatesFull) {
-        // Once per saturation episode, like documents: it ends once the
-        // pending updates are taken for writing.
+        // Once per saturation episode, like documents: it ends once pending
+        // updates are written again.
         this.updatesFull = true;
         log.error(
           "trace delivery updates queue full, dropping updates",
@@ -310,7 +310,6 @@ export class BufferedTraceWriter implements TraceSink {
       if (!this.closed && this.updates.size > 0) {
         const updates = [...this.updates.values()];
         this.updates.clear();
-        this.updatesFull = false;
         await this.writeUpdates(updates);
       }
     }
@@ -328,8 +327,10 @@ export class BufferedTraceWriter implements TraceSink {
 
   private async writeBatch(batch: Entry[]): Promise<void> {
     const docs = batch.map((entry) => entry.doc);
+    let written = false;
     try {
       const result = await this.attempt(() => this.store.insertMany(docs));
+      written = result !== undefined;
       // Abandoned by a close that timed out: already counted as dropped.
       if (this.closed) return;
       if (result) {
@@ -350,7 +351,11 @@ export class BufferedTraceWriter implements TraceSink {
       if (!this.closed) {
         this.queued -= batch.length;
         this.queuedBytes -= batch.reduce((sum, entry) => sum + entry.bytes, 0);
-        if (this.queueFull && this.queued < this.options.maxQueue) this.queueFull = false;
+        // A saturation episode only ends once the store takes writes again:
+        // during an outage, dropped batches free room without ending it.
+        if (this.queueFull && written && this.queued < this.options.maxQueue) {
+          this.queueFull = false;
+        }
       }
     }
   }
@@ -363,6 +368,7 @@ export class BufferedTraceWriter implements TraceSink {
     if (this.closed) return;
     if (done) {
       this.counters.deliveryUpdates.applied += updates.length;
+      this.updatesFull = false;
     } else {
       this.counters.deliveryUpdates.failed += updates.length;
       log.error(

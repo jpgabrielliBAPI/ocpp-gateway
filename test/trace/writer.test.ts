@@ -312,18 +312,44 @@ describe("BufferedTraceWriter", () => {
       expect(reported()).toEqual(["trace delivery updates queue full, dropping updates"]);
       expect(reports[0].extra).toMatchObject({ maxQueue: 2 });
 
-      // The pending updates are taken for writing: the queue has room again.
+      // Taken for writing, but the write is still blocked: same episode.
       await vi.advanceTimersByTimeAsync(250);
       writer.updateDelivery("c", 0, delivery("written"));
       writer.updateDelivery("d", 0, delivery("written"));
       for (let i = 1; i < 50; i++) writer.updateDelivery("c", i, delivery("written"));
+      expect(reported()).toHaveLength(1);
+
+      // Written: the episode is over, the next saturation is reported.
+      store.gate = null;
+      release();
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(writer.stats().deliveryUpdates.applied).toBeGreaterThan(0);
+      writer.updateDelivery("a", 1, delivery("written"));
+      writer.updateDelivery("b", 1, delivery("written"));
+      writer.updateDelivery("c", 1, delivery("written"));
 
       expect(reported()).toEqual([
         "trace delivery updates queue full, dropping updates",
         "trace delivery updates queue full, dropping updates",
       ]);
-      store.gate = null;
-      release();
+    });
+
+    it("keeps both queues' saturation to one report each through a long outage", async () => {
+      const { store, writer } = setup({ maxQueue: 2 });
+      store.failures = 1_000;
+      for (let cycle = 0; cycle < 5; cycle++) {
+        for (let i = 0; i < 10; i++) {
+          writer.insert(makeDoc(`doc-${cycle}-${i}`));
+          writer.updateDelivery(`old-${cycle}-${i}`, 0, delivery("written"));
+        }
+        await vi.advanceTimersByTimeAsync(2_000);
+      }
+
+      expect(store.insertCalls.length).toBeGreaterThan(3);
+      expect(reported().filter((m) => m.endsWith("queue full, dropping new traces"))).toHaveLength(
+        1,
+      );
+      expect(reported().filter((m) => m.includes("delivery updates queue full"))).toHaveLength(1);
     });
 
     it("does not report transient failures the retries absorb", async () => {

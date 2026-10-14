@@ -320,11 +320,11 @@ Reported:
 - a routes file hot reload that fails (the previous table is kept);
 - an error of the WebSocket server, e.g. the port is already in use (the gateway then exits with code 1);
 - trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped;
-- a full trace queue dropping new traces, or a full delivery-update queue dropping delivery outcomes — once per saturation episode, again once the queue has drained.
+- a full trace queue dropping new traces, or a full delivery-update queue dropping delivery outcomes — once per saturation episode, which only ends once MongoDB takes writes again (a long outage raises no new alert).
 
 Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
 
-Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings, source lines and local variables are never collected, and credentials in URLs are masked before an event leaves the gateway. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
+Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings, source lines and local variables are never collected, and credentials in URLs (userinfo, query values, fragment) are masked before an event leaves the gateway — a URL whose end cannot be told from the next one is dropped whole. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
 
 Limitations:
 
