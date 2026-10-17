@@ -117,22 +117,25 @@ describe("redactUrlsInText", () => {
     expect(redactUrlsInText(`see ${url}`)).toBe(`see ${expected}`);
   });
 
-  it.each(["/", "?", "#", "\\"])(
-    "masks a password holding a %s, which the URL parser would read as the host's end",
-    (char) => {
-      const redacted = redactUrlsInText(
-        `cannot reach wss://user:123${char}s3cret@csms.example.com/ocpp now`,
-      );
+  it.each([
+    ["a password holding a /", "wss://user:123/s3cret@csms.example.com/ocpp"],
+    ["a password holding a ?", "wss://user:123?s3cret@csms.example.com/ocpp"],
+    ["a password holding a #", "wss://user:123#s3cret@csms.example.com/ocpp"],
+    ["a password holding a \\", "wss://user:pa\\s3cret@csms.example.com/ocpp"],
+    ["an @ in a query value", "wss://csms.example.com/ocpp?token=a@b.example/s3cret"],
+    ["an @ in the path", "wss://csms.example.com/ocpp/a@b.example/s3cret"],
+    ["an @ in the fragment", "wss://csms.example.com/ocpp#a@b.example/s3cret"],
+  ])("drops a URL whose @ cannot be placed (%s)", (_, url) => {
+    const redacted = redactUrlsInText(`cannot reach ${url} now`);
 
-      expect(redacted).not.toMatch(/user|123|s3cret/);
-      expect(redacted).toBe("cannot reach wss://***@csms.example.com/ocpp now");
-    },
-  );
+    expect(redacted).not.toMatch(/s3cret|b\.example|user|123/);
+    expect(redacted).toBe("cannot reach <invalid url> now");
+  });
 
-  it("masks up to the last @ when one may be in a query value (fails closed)", () => {
-    expect(redactUrlsInText("wss://csms.example.com/ocpp?email=a@b.example.com")).toBe(
-      "wss://***@b.example.com/",
-    );
+  it("masks userinfo whose @ comes before any path, query or fragment", () => {
+    expect(
+      redactUrlsInText("mongodb://admin:p@ss@h1.example.com,h2.example.com/db?replicaSet=rs"),
+    ).toBe("mongodb://***@h1.example.com,h2.example.com/db?replicaSet=***");
   });
 
   it("keeps the punctuation closing a URL without query nor fragment", () => {

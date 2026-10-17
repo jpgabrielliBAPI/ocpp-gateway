@@ -324,7 +324,7 @@ Reported:
 
 Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
 
-Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings, source lines and local variables are never collected, and credentials in URLs (userinfo, query values, fragment) are masked before an event leaves the gateway — a URL whose end cannot be told from the next one is dropped whole. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
+Only errors are sent: no performance tracing, no logs, no sessions, no HTTP breadcrumbs. Request headers (chargers' `Authorization`), cookies, bodies, query strings, source lines and local variables are never collected, and credentials in URLs (userinfo, query values, fragment) are masked before an event leaves the gateway — a URL whose end cannot be told from the next one, or whose `@` follows a path, query or fragment, is dropped whole. Events carry the reporting component as the `component` tag. Stack traces point to the TypeScript sources: the image runs Node with `--enable-source-maps`.
 
 Limitations:
 

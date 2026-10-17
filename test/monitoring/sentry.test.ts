@@ -138,20 +138,24 @@ describe("openSentryReporter", () => {
       ),
       extra: {
         backends: "wss://a.example.com/ocpp;wss://bob:hunt3r@c.example.com/ocpp#k3y)",
-        // The URL parser alone would read "123" as a port and keep the rest.
+        // An @ that cannot be placed: the URL is dropped whole.
         slashInPassword: "wss://carol:123/pa55@d.example.com/ocpp",
+        atInQuery: "wss://e.example.com/ocpp?token=a@f.example/s3cret",
       },
     });
     await reporter.close(1_000);
 
     expect(events).toHaveLength(1);
     const sent = bodies.join("\n");
-    expect(sent).not.toMatch(/alice|s3cret|bob|hunt3r|k3y|token=!|carol|pa55/);
+    expect(sent).not.toMatch(/alice|s3cret|bob|hunt3r|k3y|token=!|carol|pa55|[df]\.example/);
     expect(sent).toContain(
       "cannot reach wss://a.example.com/ocpp,wss://***@b.example.com/ocpp?token=***",
     );
     expect(sent).toContain("wss://a.example.com/ocpp;wss://***@c.example.com/ocpp#***");
-    expect(sent).toContain("wss://***@d.example.com/ocpp");
+    expect(events[0].extra).toMatchObject({
+      slashInPassword: "<invalid url>",
+      atInQuery: "<invalid url>",
+    });
   });
 
   it("sends no breadcrumbs, sessions nor traces of the gateway's WebSocket traffic", async () => {
