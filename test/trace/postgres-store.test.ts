@@ -42,7 +42,10 @@ describe("PostgresTraceStore", () => {
     const admin = new Pool({
       connectionString: POSTGRES_URL ?? "postgresql://user:password@127.0.0.1/unused",
     });
-    const store = PostgresTraceStore.create({ postgresUrl: POSTGRES_URL!, retentionDays: 30 });
+    const store = PostgresTraceStore.create({
+      postgresUrl: POSTGRES_URL ?? "postgresql://user:password@127.0.0.1/unused",
+      retentionDays: 30,
+    });
 
     afterAll(async () => {
       if (ids.length) {

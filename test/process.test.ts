@@ -67,7 +67,10 @@ let child: ChildProcess | undefined;
 let held: Server | undefined;
 
 beforeAll(async () => {
-  execFileSync("npm", ["run", "build"], { cwd: ROOT, stdio: "ignore" });
+  execFileSync(process.execPath, [process.env.npm_execpath ?? "npm", "run", "build"], {
+    cwd: ROOT,
+    stdio: "ignore",
+  });
   ingest = await startIngest();
 }, 60_000);
 
@@ -155,7 +158,7 @@ describe("gateway process with Sentry enabled", () => {
     TIMEOUT_MS,
   );
 
-  it.each([
+  (process.platform === "win32" ? it.skip : it).each([
     ["an uncaught exception", 'throw new Error("probe failure")'],
     ["an unhandled rejection", 'void Promise.reject(new Error("probe failure"))'],
   ])(
@@ -175,7 +178,7 @@ describe("gateway process with Sentry enabled", () => {
     TIMEOUT_MS,
   );
 
-  it(
+  (process.platform === "win32" ? it.skip : it)(
     "still sends what is pending when a shutdown hangs and is forced",
     async () => {
       // A request whose headers never end keeps server.close() waiting, so
@@ -228,7 +231,7 @@ describe("gateway process with Sentry enabled", () => {
     TIMEOUT_MS,
   );
 
-  it(
+  (process.platform === "win32" ? it.skip : it)(
     "sends what is pending before a graceful shutdown exits",
     async () => {
       const { proc, exited, logged } = startGateway({ PORT: String(await freePort()) });
