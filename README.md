@@ -431,7 +431,28 @@ One row per received frame — never one per destination, and a frame replayed a
 
   Statuses only move forward (`queued` → `submitted` → a final status), so a late or repeated update never overwrites a newer one. Usually a frame is written once, with its final outcome already known.
 - **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description, a binary frame that is not valid UTF-8. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
-- **SQL schema:** `ocpp_traces` stores indexed routing columns (`tenant_id`, `charge_point_id`, `session_id`, `seq`, timestamps) and the full record as `jsonb` in `document`. The gateway creates the table and indexes automatically; the PostgreSQL user needs permission to create tables and indexes, insert and update rows, and delete expired rows. Query the JSON record with ordinary SQL, for example: `SELECT document->'trace'->>'action', count(*) FROM ocpp_traces WHERE document->>'kind' = 'trace' GROUP BY 1;`.
+- **SQL schema:** `ocpp_traces` stores indexed routing columns (`tenant_id`, `charge_point_id`, `session_id`, `seq`, timestamps) and the full record as `jsonb` in `document`. The gateway creates the table and indexes automatically; the PostgreSQL user needs permission to create tables and indexes, insert and update rows, and delete expired rows. Query the JSON record with normal PostgreSQL SQL and JSONB operators:
+
+  ```sql
+  -- Count OCPP actions over the last day
+  SELECT document->'trace'->>'action' AS action, count(*)
+  FROM ocpp_traces
+  WHERE received_at >= now() - interval '1 day'
+    AND document->>'kind' = 'trace'
+  GROUP BY action
+  ORDER BY count(*) DESC;
+
+  -- Find a charge point's latest frames and delivery outcomes
+  SELECT received_at,
+         document->'trace'->>'direction' AS direction,
+         document->'trace'->>'action' AS action,
+         document->'deliveries' AS deliveries
+  FROM ocpp_traces
+  WHERE tenant_id = 'tenant-a'
+    AND charge_point_id = 'CP-001'
+  ORDER BY received_at DESC
+  LIMIT 100;
+  ```
 
 ### Requests, responses, primary and secondaries
 
