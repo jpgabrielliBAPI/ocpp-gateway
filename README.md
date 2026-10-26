@@ -80,6 +80,64 @@ Routing is driven by a JSON file (path from `ROUTES_FILE`, default `./routes.jso
 - `CP-002` → primary `wss://fixed-csms.example.com/XXXXXXXX` (unchanged), no secondary
 - every other charger → `wss://csms.example.com/ocpp/<chargeBoxId>` only
 
+### Example: Autel MaxiCharger, your EMS, and Chargemap
+
+The gateway can connect a MaxiCharger to your EMS and mirror the charger's OCPP
+traffic to Chargemap, provided both services give you OCPP WebSocket endpoints
+that accept connections from the gateway. The example below makes the EMS the
+**primary** (it can send commands back to the charger) and Chargemap a
+**read-only secondary**:
+
+```json
+{
+  "default": {
+    "primary": {
+      "id": "my-ems",
+      "url": "wss://ems.example.com/ocpp"
+    },
+    "secondaries": []
+  },
+  "chargers": {
+    "AUTEL-001": {
+      "primary": {
+        "id": "my-ems",
+        "url": "wss://ems.example.com/ocpp"
+      },
+      "secondaries": [
+        {
+          "id": "chargemap",
+          "url": "wss://ocpp.chargemap.example/endpoint"
+        }
+      ]
+    }
+  }
+}
+```
+
+Replace `AUTEL-001` with the charge point identity configured on the charger,
+and replace both example URLs with the exact OCPP URLs supplied by your EMS and
+Chargemap. By default the gateway appends `/AUTEL-001` to each URL; set
+`"appendChargeBoxId": false` on a backend if its supplied URL already includes
+the complete station path. Configure the charger to connect to the gateway
+instead, for example `wss://gateway.example.com/AUTEL-001`, using the OCPP
+version and WebSocket security settings supported by that charger firmware and
+required by the receiving services.
+
+**Choose the primary according to who must control the charger.** Only the
+primary's OCPP responses and remote commands reach the charger. A secondary
+receives a one-way copy of charger traffic; its replies and commands are
+discarded. If Chargemap must control the charger, make its endpoint the
+primary and put the EMS under `secondaries` only if it is intended to be a
+read-only mirror. This gateway cannot make both services independently
+bidirectional for the same charger.
+
+Before connecting, confirm with both providers that they accept a gateway
+connection and obtain their exact endpoint, charge point identity, OCPP
+version, TLS requirements, and authentication method. The gateway forwards the
+charger's `Authorization` header to every backend; it does not configure
+different authorization headers per destination. Do not put real credentials
+in a committed routes file.
+
 ### Hot reload
 
 The gateway watches the routes file and reloads it on change. Existing charger sessions keep the route they connected with; only new connections pick up the change. If a reload fails validation, the error is logged and the previous table stays in effect.
