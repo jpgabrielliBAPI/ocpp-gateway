@@ -1,7 +1,7 @@
 import type { TraceConfig } from "../config";
 import { createLogger } from "../logger";
 import { errorMessage } from "../utils/errors";
-import type { MongoTraceStore } from "./mongo-store";
+import type { PostgresTraceStore } from "./postgres-store";
 import { BufferedTraceWriter, type TraceSink } from "./writer";
 
 const log = createLogger("trace");
@@ -19,26 +19,24 @@ export interface TraceArchive {
 }
 
 /**
- * Wire trace archiving to MongoDB. The driver is only loaded here, so a
- * gateway with archiving disabled never loads it. Does not wait for MongoDB:
+ * Wire trace archiving to PostgreSQL. The driver is only loaded here, so a
+ * gateway with archiving disabled never loads it. Does not wait for PostgreSQL:
  * the gateway starts (and keeps forwarding) while it is unavailable.
- * Throws on an invalid connection string.
+ * Throws on an invalid connection URL.
  */
 export async function openTraceArchive(config: TraceConfig): Promise<TraceArchive> {
-  const mongo = await import("./mongo-store");
-  let store: MongoTraceStore;
+  const postgres = await import("./postgres-store");
+  let store: PostgresTraceStore;
   try {
-    store = mongo.MongoTraceStore.create(config);
+    store = postgres.PostgresTraceStore.create(config);
   } catch (err) {
-    throw new Error(`invalid TRACE_MONGODB_URI: ${errorMessage(err)}`);
+    throw new Error(`invalid TRACE_POSTGRES_URL: ${errorMessage(err)}`);
   }
   const writer = new BufferedTraceWriter(store, { maxQueue: config.queueMax });
   log.info("trace archiving enabled", {
-    database: config.database,
-    collection: mongo.TRACE_COLLECTION,
+    table: postgres.TRACE_TABLE,
     retentionDays: config.retentionDays,
     queueMax: config.queueMax,
-    requireCapped: config.requireCapped,
   });
 
   let closing: Promise<void> | undefined;

@@ -17,8 +17,7 @@ describe("loadConfig", () => {
     "MAX_SESSIONS_PER_SOURCE",
     "CLIENT_IP_HEADER",
     "TRACE_ENABLED",
-    "TRACE_MONGODB_URI",
-    "TRACE_MONGODB_DATABASE",
+    "TRACE_POSTGRES_URL",
     "TRACE_RETENTION_DAYS",
     "TRACE_QUEUE_MAX",
     "SENTRY_DSN",
@@ -306,85 +305,65 @@ describe("loadConfig", () => {
   describe("trace archiving", () => {
     const enable = () => {
       vi.stubEnv("TRACE_ENABLED", "true");
-      vi.stubEnv("TRACE_MONGODB_URI", "mongodb://user:s3cret@mongo.example.com:27017/?tls=true");
+      vi.stubEnv("TRACE_POSTGRES_URL", "postgresql://user:password@db.example.com/ocpp_gateway");
     };
 
     it("is disabled by default, whatever the other TRACE_ settings", () => {
-      vi.stubEnv("TRACE_MONGODB_URI", "not a uri");
+      vi.stubEnv("TRACE_POSTGRES_URL", "not a uri");
       vi.stubEnv("TRACE_RETENTION_DAYS", "-1");
-
       expect(loadConfig().trace).toBeUndefined();
     });
 
     it("applies defaults once enabled", () => {
       enable();
-
       expect(loadConfig().trace).toEqual({
-        mongodbUri: "mongodb://user:s3cret@mongo.example.com:27017/?tls=true",
-        database: "ocpp_gateway",
+        postgresUrl: "postgresql://user:password@db.example.com/ocpp_gateway",
         retentionDays: 30,
         queueMax: 10_000,
-        requireCapped: false,
       });
     });
 
     it("reads every setting", () => {
       enable();
-      vi.stubEnv("TRACE_MONGODB_URI", " mongodb+srv://cluster.example.com ");
-      vi.stubEnv("TRACE_MONGODB_DATABASE", "traces");
+      vi.stubEnv("TRACE_POSTGRES_URL", " postgresql://user:password@db.example.com/traces ");
       vi.stubEnv("TRACE_RETENTION_DAYS", "7");
       vi.stubEnv("TRACE_QUEUE_MAX", "500");
-      vi.stubEnv("TRACE_REQUIRE_CAPPED", "true");
-
       expect(loadConfig().trace).toEqual({
-        mongodbUri: "mongodb+srv://cluster.example.com",
-        database: "traces",
+        postgresUrl: "postgresql://user:password@db.example.com/traces",
         retentionDays: 7,
         queueMax: 500,
-        requireCapped: true,
       });
     });
 
-    it("requires TRACE_MONGODB_URI", () => {
+    it("requires TRACE_POSTGRES_URL", () => {
       vi.stubEnv("TRACE_ENABLED", "true");
-
       expect(() => loadConfig()).toThrow(
-        "Invalid value for environment variable TRACE_MONGODB_URI: required when TRACE_ENABLED is true",
+        "Invalid value for environment variable TRACE_POSTGRES_URL: required when TRACE_ENABLED is true",
       );
     });
 
-    it("rejects a non-MongoDB URI without echoing it", () => {
+    it("rejects a non-PostgreSQL URL", () => {
       enable();
-      vi.stubEnv("TRACE_MONGODB_URI", "https://user:s3cret@mongo.example.com");
-
+      vi.stubEnv("TRACE_POSTGRES_URL", "mongodb://user:password@db.example.com");
       expect(() => loadConfig()).toThrow(
-        "Invalid value for environment variable TRACE_MONGODB_URI: must start with mongodb:// or mongodb+srv://",
+        "Invalid value for environment variable TRACE_POSTGRES_URL: must start with postgres:// or postgresql://",
       );
-      expect(() => loadConfig()).not.toThrow(/s3cret/);
+      expect(() => loadConfig()).not.toThrow(/password/);
     });
 
     it.each([
       { envName: "TRACE_ENABLED", value: "yes", expectedCause: /Invalid boolean value/ },
-      { envName: "TRACE_REQUIRE_CAPPED", value: "yes", expectedCause: /Invalid boolean value/ },
-      { envName: "TRACE_MONGODB_DATABASE", value: "a/b", expectedCause: /Invalid database name/ },
-      { envName: "TRACE_MONGODB_DATABASE", value: "a.b", expectedCause: /Invalid database name/ },
-      {
-        envName: "TRACE_MONGODB_DATABASE",
-        value: "x".repeat(64),
-        expectedCause: /Invalid database name/,
-      },
       { envName: "TRACE_RETENTION_DAYS", value: "0", expectedCause: /between 1 and 36500/ },
       { envName: "TRACE_RETENTION_DAYS", value: "1.5", expectedCause: /Invalid integer/ },
       { envName: "TRACE_QUEUE_MAX", value: "0", expectedCause: /between 1 and 1000000/ },
     ])("rejects invalid $envName value $value", ({ envName, value, expectedCause }) => {
       enable();
       vi.stubEnv(envName, value);
-
-      expect(() => loadConfig()).toThrow(`Invalid value for environment variable ${envName}`);
+      expect(() => loadConfig()).toThrow("Invalid value for environment variable " + envName);
       expect(() => loadConfig()).toThrow(expectedCause);
     });
 
-    it("refuses MAX_MESSAGE_BYTES above what a MongoDB document can hold", () => {
+    it("keeps messages below PostgreSQL's JSONB field limit", () => {
       enable();
       vi.stubEnv("MAX_MESSAGE_BYTES", String(15 * 1024 * 1024 + 1));
 

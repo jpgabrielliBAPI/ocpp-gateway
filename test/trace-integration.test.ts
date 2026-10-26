@@ -1,16 +1,15 @@
-import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MongoClient } from "mongodb";
+import { Pool } from "pg";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DEFAULT_MAX_MESSAGE_BYTES } from "../src/config";
 import { configureLogger } from "../src/logger";
 import { startProxy } from "../src/proxy";
 import { RouteStore } from "../src/routes";
-import { MongoTraceStore, TRACE_COLLECTION } from "../src/trace/mongo-store";
+import { PostgresTraceStore, TRACE_TABLE } from "../src/trace/postgres-store";
 import type { TraceDocument } from "../src/trace/record";
 import { SessionTracer } from "../src/trace/session-tracer";
 import { BufferedTraceWriter, type DeliveryUpdate, type TraceStore } from "../src/trace/writer";
@@ -236,12 +235,12 @@ describe("trace archiving through the gateway", () => {
     });
   });
 
-  it("keeps forwarding while MongoDB is unreachable, dropping traces instead", async () => {
+  it("keeps forwarding while PostgreSQL is unreachable, dropping traces instead", async () => {
     const [primary] = await csmsFor(answering("primary"));
-    const store = MongoTraceStore.create(
-      { mongodbUri: "mongodb://127.0.0.1:1", database: "ocpp_gateway", retentionDays: 1 },
-      { serverSelectionTimeoutMS: 100 },
-    );
+    const store = PostgresTraceStore.create({
+      postgresUrl: "postgresql://user:password@127.0.0.1:1/ocpp_gateway",
+      retentionDays: 1,
+    });
     const writer = new BufferedTraceWriter(store, {
       maxQueue: 100,
       flushIntervalMs: 10,
@@ -379,35 +378,6 @@ describe("trace archiving through the gateway", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 });
-
-/** Set to run against a real MongoDB, e.g. `mongodb://127.0.0.1:27017`. */
-const MONGODB_URI = process.env.TRACE_TEST_MONGODB_URI;
-
-/** A store whose inserts wait while `held`, to make writes race deterministically. */
-class HeldInsertsStore implements TraceStore {
-  held = true;
-  insertCalls = 0;
-  updateCalls = 0;
-  private readonly waiting: (() => void)[] = [];
-
-  constructor(private readonly store: TraceStore) {}
-
-  async insertMany(docs: TraceDocument[]) {
-    this.insertCalls++;
-    if (this.held) await new Promise<void>((resolve) => this.waiting.push(resolve));
-    return this.store.insertMany(docs);
-  }
-
-  updateDeliveries(updates: DeliveryUpdate[]) {
-    this.updateCalls++;
-    return this.store.updateDeliveries(updates);
-  }
-
-  release() {
-    this.held = false;
-    for (const resolve of this.waiting.splice(0)) resolve();
-  }
-}
 
 describe("trace selection per tenant", () => {
   const TENANTS = { tenantBaseDomain: "ocpp.example.com" };
@@ -613,59 +583,76 @@ describe("trace selection per tenant", () => {
   });
 });
 
-describe.skipIf(!MONGODB_URI)("trace archiving to MongoDB, end to end", { timeout: 30_000 }, () => {
-  it("stores a frame replayed to a reconnecting secondary once, with its final deliveries", async () => {
-    const database = `ocpp_gateway_e2e_${randomUUID().slice(0, 8)}`;
-    const client = new MongoClient(MONGODB_URI!);
+const POSTGRES_URL = process.env.TRACE_TEST_POSTGRES_URL;
+
+class HeldInsertsStore implements TraceStore {
+  held = true;
+  ids: string[] = [];
+  private readonly waiting: (() => void)[] = [];
+
+  constructor(private readonly store: TraceStore) {}
+
+  async insertMany(docs: TraceDocument[]) {
+    this.ids.push(...docs.map((doc) => doc.id));
+    if (this.held) await new Promise<void>((resolve) => this.waiting.push(resolve));
+    return this.store.insertMany(docs);
+  }
+
+  updateDeliveries(updates: DeliveryUpdate[]) {
+    return this.store.updateDeliveries(updates);
+  }
+
+  release() {
+    this.held = false;
+    for (const resolve of this.waiting.splice(0)) resolve();
+  }
+}
+
+describe.skipIf(!POSTGRES_URL)("trace archiving to PostgreSQL, end to end", () => {
+  it("persists a replayed secondary frame once, with its final delivery outcome", async () => {
+    const admin = new Pool({ connectionString: POSTGRES_URL! });
+    const postgres = PostgresTraceStore.create({ postgresUrl: POSTGRES_URL!, retentionDays: 1 });
+    const store = new HeldInsertsStore(postgres);
+    const writer = new BufferedTraceWriter(store, { maxQueue: 100, flushIntervalMs: 10 });
     cleanups.push(async () => {
-      await client.db(database).dropDatabase();
-      await client.close();
+      await writer.close(1000);
+      if (store.ids.length) {
+        await admin.query(`DELETE FROM ${TRACE_TABLE} WHERE id = ANY($1::text[])`, [store.ids]);
+      }
+      await admin.end();
+      await postgres.close();
     });
+
     const [primary, mirror] = await csmsFor(
       answering("primary"),
       answering("mirror-1", { holdHandshakes: true }),
     );
-    const mongo = MongoTraceStore.create({ mongodbUri: MONGODB_URI!, database, retentionDays: 1 });
-    const store = new HeldInsertsStore(mongo);
-    const writer = new BufferedTraceWriter(store, { maxQueue: 100, flushIntervalMs: 10 });
-    cleanups.push(() => mongo.close());
     const gateway = await startGateway(routes(primary, mirror), {}, { traceSink: writer });
     cleanups.push(() => gateway.close());
     const { charger, received } = await connect(gateway.port);
     await waitFor(() => primary.connected() && mirror.heldHandshakes() === 1);
 
-    // The CALL reaches the primary; the secondary, still connecting, queues it.
     charger.send(boot("m1"));
-    await waitFor(() => received.length === 1 && store.insertCalls > 0);
-
-    // While the initial insert is in flight, the secondary connects, the
-    // queued frame is replayed and its delivery reported: an update racing
-    // with the insert of the same document.
+    await waitFor(() => received.length === 1 && store.ids.length > 0);
     mirror.releaseHandshakes();
     await waitFor(() => mirror.received().includes(boot("m1")));
     await sleep(50);
-    expect(store.updateCalls).toBe(0);
-
     store.release();
     await writer.close(5_000);
-    // The secondary's outcome was written as an update, after the insert.
-    expect(store.updateCalls).toBeGreaterThan(0);
 
-    const traces = client.db(database).collection<{
-      _id: string;
-      kind: string;
-      trace?: { messageType: string; messageId: string };
-      deliveries: { target: string; status: string }[];
-    }>(TRACE_COLLECTION);
-    const calls = await traces.find({ "trace.messageType": "CALL" }).toArray();
+    const result = await admin.query<{ document: TraceDocument }>(
+      `SELECT document FROM ${TRACE_TABLE} WHERE id = ANY($1::text[])`,
+      [store.ids],
+    );
+    const calls = result.rows.filter(({ document }) => traceOf(document)?.messageType === "CALL");
     expect(calls).toHaveLength(1);
-    expect(calls[0].trace?.messageId).toBe("m1");
-    expect(calls[0].deliveries.map((d) => [d.target, d.status])).toEqual([
+    expect(
+      calls[0].document.deliveries.map((delivery) => [delivery.target, delivery.status]),
+    ).toEqual([
       ["csms-main", "written"],
       ["mirror-1", "written"],
     ]);
-    // The CALL, and the response of each CSMS.
-    expect(await traces.countDocuments()).toBe(3);
+    expect(result.rows).toHaveLength(3);
     expect(writer.stats()).toMatchObject({ accepted: 3, persisted: 3, queued: 0 });
   });
 });

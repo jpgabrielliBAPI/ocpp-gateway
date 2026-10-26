@@ -1,0 +1,25 @@
+# Local PostgreSQL for trace archiving:
+#   docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build
+# Every backend in routes.json needs an "id" (see README "Trace archiving").
+services:
+  ocpp-gateway:
+    environment:
+      TRACE_ENABLED: "true"
+      TRACE_POSTGRES_URL: postgresql://ocpp:ocpp@postgres:5432/ocpp_gateway
+    depends_on:
+      - postgres
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ocpp_gateway
+      POSTGRES_USER: ocpp
+      POSTGRES_PASSWORD: ocpp
+    expose:
+      - "5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  postgres-data:

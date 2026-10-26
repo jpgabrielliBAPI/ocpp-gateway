@@ -20,24 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   IP address in, so per-source limits do not see the whole fleet as one source.
   Once set, a connection where it is missing, duplicated or not a bare IP
   address is closed with `1008`.
-- Optional trace archiving to MongoDB (`TRACE_ENABLED`, `TRACE_MONGODB_URI`,
-  `TRACE_MONGODB_DATABASE`, `TRACE_RETENTION_DAYS`, `TRACE_QUEUE_MAX`). Every
-  OCPP frame received from a charger, the primary or a secondary CSMS is
+- Optional trace archiving to PostgreSQL (`TRACE_ENABLED`, `TRACE_POSTGRES_URL`,
+  `TRACE_RETENTION_DAYS`, `TRACE_QUEUE_MAX`). Every received OCPP frame is
   stored once as an [Open OCPP Trace](https://github.com/open-ocpp-trace/specification)
-  v1.1 record, with its tenant, gateway session, source, each destination's
-  delivery outcome (queued, submitted, written, failed, dropped) and the CALL
-  it answers. Traces expire through a MongoDB TTL index; nothing is written
-  while that index cannot be created, and it is recreated before the next
-  write if the collection is dropped while the gateway runs (a collection
-  created beforehand, e.g. capped, is kept; a drop racing a write can still
-  let one batch in before the index is back). Archiving never
-  delays forwarding: writes are batched in the background, bounded in memory,
-  and dropped (counted and logged) when MongoDB is unavailable. Disabled by
-  default; the MongoDB driver is not even loaded then.
-- `TRACE_REQUIRE_CAPPED` (off by default): only write traces into an existing
-  capped `ocpp_traces` collection, created by the operator, and never create
-  it, so that a dropped collection stops archiving instead of coming back
-  uncapped. Required wherever that cap is what bounds the archive's disk usage.
+  v1.1 record in `ocpp_traces`, with delivery outcomes and correlation data.
+  The full record is queryable as JSONB, with indexed relational columns for
+  tenant, charge point, session, sequence and timestamps. The gateway creates
+  the table and indexes automatically and removes expired rows before batches.
+  Writes are batched in the background and bounded in memory; unavailable
+  PostgreSQL never delays forwarding. Disabled by default; the `pg` driver is
+  not loaded when archiving is off.
 - Per-tenant switch for trace archiving: `"trace": false` on a tenant of the
   routes file (or at its root, for connections without a tenant) relays that
   scope as before but keeps its frames out of the archive. Every scope is
@@ -49,8 +41,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   trace archiving is enabled; validated whenever present (format, unique within
   a route, one server — scheme, host, port — per id within the global routes or
   a tenant).
-- `docker-compose.mongo.yml`, a Compose overlay running a local MongoDB for
-  trace archiving.
+- `docker-compose.postgres.yml`, a Compose overlay running PostgreSQL locally
+  for trace archiving.
 - Optional error reporting to Sentry (`SENTRY_DSN`, `SENTRY_ENVIRONMENT`,
   `SENTRY_RELEASE`): crashes, startup failures, failed routes reloads,
   WebSocket server errors and trace archiving outages are sent as Sentry

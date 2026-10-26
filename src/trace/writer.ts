@@ -21,7 +21,7 @@ export interface DeliveryUpdate {
 }
 
 /**
- * Persistence port of the writer (MongoDB in production). Errors it throws are
+ * Persistence port of the writer (PostgreSQL in production). Errors it throws are
  * logged as is: they must never carry credentials.
  */
 export interface TraceStore {
@@ -98,7 +98,7 @@ function estimateBytes(doc: TraceDocument): number {
 
 /**
  * The non-blocking, bounded {@link TraceSink}: documents wait in memory and
- * are written by batches in the background, one batch at a time, so MongoDB
+ * are written by batches in the background, one batch at a time, so PostgreSQL
  * never slows down or breaks forwarding.
  *
  * - A full queue (by count or bytes) refuses new documents: memory stays

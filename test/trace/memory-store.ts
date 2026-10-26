@@ -1,7 +1,7 @@
 import { DELIVERY_STATUS_RANK, type TraceDocument } from "../../src/trace/record";
 import type { DeliveryUpdate, TraceStore } from "../../src/trace/writer";
 
-/** An in-memory store that applies the same guarded updates as MongoDB would. */
+/** An in-memory store that applies the same guarded updates as PostgreSQL does. */
 export class FakeStore implements TraceStore {
   readonly stored = new Map<string, TraceDocument>();
   readonly insertCalls: string[][] = [];

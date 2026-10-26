@@ -2,7 +2,7 @@
 
 A lightweight **OCPP WebSocket gateway** that sits between your EV chargers and one or more CSMS backends. Each charge point is routed by its **chargeBoxId** to its own **primary CSMS** (full bidirectional control) and, optionally, to one or more **secondary backends** that receive a read-only mirror of the charger's traffic — perfect for monitoring, analytics, or migrating between platforms without reconfiguring your chargers.
 
-A single endpoint serves every charger: the gateway reads the chargeBoxId from the connection URL and looks it up in a routing table. Built with Node.js and TypeScript. Supports OCPP 1.6 and 2.0.1. Optionally, every OCPP frame can be archived in MongoDB as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) records — see [Trace archiving](#trace-archiving-optional).
+A single endpoint serves every charger: the gateway reads the chargeBoxId from the connection URL and looks it up in a routing table. Built with Node.js and TypeScript. Supports OCPP 1.6 and 2.0.1. Optionally, every OCPP frame can be archived in PostgreSQL as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) records — see [Trace archiving](#trace-archiving-optional).
 
 > Forked from [joulo-nl/joulo-ocpp-proxy](https://github.com/joulo-nl/joulo-ocpp-proxy) (MIT). The original uses a single global primary/secondary configuration for all chargers; this fork replaces it with a **per-chargeBoxId routing table**.
 
@@ -227,12 +227,10 @@ All configuration is done through environment variables:
 | `MAX_PENDING_SESSIONS`         | No       | — (unlimited)   | Sessions whose primary CSMS link is still connecting; more are closed with `1013` |
 | `MAX_SESSIONS_PER_SOURCE`      | No       | — (unlimited)   | Live charger sessions per client source (IP address); more are closed with `1013` |
 | `CLIENT_IP_HEADER`             | No       | — (socket address) | Header holding the client's IP address, set by a **trusted** reverse proxy (e.g. `cf-connecting-ip`, `x-real-ip`). A connection without exactly one value that is a bare IP address is closed with `1008` |
-| `TRACE_ENABLED`                | No       | `false`         | Archive every OCPP frame in MongoDB. See [Trace archiving](#trace-archiving-optional) |
-| `TRACE_MONGODB_URI`            | With `TRACE_ENABLED` | —   | `mongodb://` or `mongodb+srv://` connection string. May carry credentials; never logged |
-| `TRACE_MONGODB_DATABASE`       | No       | `ocpp_gateway`  | Database holding the `ocpp_traces` collection                                       |
-| `TRACE_RETENTION_DAYS`         | No       | `30`            | Days each trace is kept (`1`–`36500`), through a MongoDB TTL index                  |
-| `TRACE_QUEUE_MAX`              | No       | `10000`         | Traces held in memory while waiting for MongoDB (`1`–`1000000`); more are dropped   |
-| `TRACE_REQUIRE_CAPPED`         | No       | `false`         | Only write into an existing **capped** `ocpp_traces` collection; never create it. See [Trace archiving](#trace-archiving-optional) |
+| `TRACE_ENABLED`                | No       | `false`         | Archive every OCPP frame in PostgreSQL. See [Trace archiving](#trace-archiving-optional) |
+| `TRACE_POSTGRES_URL`            | With `TRACE_ENABLED` | —   | PostgreSQL connection URL (`postgres://` or `postgresql://`). May carry credentials; never logged |
+| `TRACE_RETENTION_DAYS`         | No       | `30`            | Days each trace is kept (`1`–`36500`); expired rows are deleted before trace batches |
+| `TRACE_QUEUE_MAX`              | No       | `10000`         | Traces held in memory while waiting for PostgreSQL (`1`–`1000000`); more are dropped |
 | `SENTRY_DSN`                   | No       | — (disabled)    | Report crashes and internal anomalies to Sentry. See [Error reporting](#error-reporting-optional) |
 | `SENTRY_ENVIRONMENT`           | No       | —               | Sentry environment (e.g. `production`, `staging`)                                   |
 | `SENTRY_RELEASE`               | No       | `ocpp-gateway@<version>` | Sentry release                                                             |
@@ -319,8 +317,8 @@ Reported:
 - startup failures once the configuration is read: an unreadable or invalid routes file, a trace archive that cannot start;
 - a routes file hot reload that fails (the previous table is kept);
 - an error of the WebSocket server, e.g. the port is already in use (the gateway then exits with code 1);
-- trace archiving outages: the MongoDB store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped;
-- a full trace queue dropping new traces, or a full delivery-update queue dropping delivery outcomes — once per saturation episode, which only ends once MongoDB takes writes again (a long outage raises no new alert).
+- trace archiving outages: the PostgreSQL store becoming unavailable, and traces lost because of it — once per outage, however many batches are dropped;
+- a full trace queue dropping new traces, or a full delivery-update queue dropping delivery outcomes — once per saturation episode, which only ends once PostgreSQL takes writes again (a long outage raises no new alert).
 
 Not reported: charger and CSMS connection errors (resets, timeouts, an unreachable secondary…), which are expected in the field and stay in the logs.
 
@@ -333,16 +331,16 @@ Limitations:
 
 ## Trace archiving (optional)
 
-With `TRACE_ENABLED=true`, the gateway stores **every OCPP frame it receives** — from the charger, from the primary CSMS, and from each secondary CSMS — in the MongoDB collection `ocpp_traces`, as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) v1.1 records. Archiving is off by default; when off, no MongoDB connection is made, the driver is not even loaded, and forwarding is unchanged.
+With `TRACE_ENABLED=true`, the gateway stores **every OCPP frame it receives** — from the charger, from the primary CSMS, and from each secondary CSMS — in the PostgreSQL table `ocpp_traces`, as [Open OCPP Trace](https://github.com/open-ocpp-trace/specification) v1.1 records. The complete document is queryable as `jsonb`; archiving is off by default, and when off, no PostgreSQL connection is made and the driver is not loaded.
 
 ```bash
 TRACE_ENABLED=true \
-TRACE_MONGODB_URI='mongodb://user:password@mongo.internal:27017/?authSource=admin' \
+TRACE_POSTGRES_URL='postgresql://user:password@db.example.com/ocpp_gateway' \
 TRACE_RETENTION_DAYS=30 \
 ROUTES_FILE=./routes.json npm start
 ```
 
-To try it locally, `docker compose -f docker-compose.yml -f docker-compose.mongo.yml up --build` runs the gateway with a MongoDB reachable only from the Compose network.
+To try it locally, `docker compose -f docker-compose.yml -f docker-compose.postgres.yml up --build` runs the gateway with PostgreSQL reachable only from the Compose network.
 
 **Backend ids are required.** A trace names each CSMS by its backend `id` (see [Routing configuration](#routing-configuration)), never by its URL. With archiving enabled, the gateway refuses to start if a backend has no `id`, and a hot reload that removes one is rejected (the previous table stays in effect). A session keeps the ids of the route it connected with.
 
@@ -368,21 +366,21 @@ Every scope is archived by default. Set `"trace": false` on a tenant to relay it
 
 ### What is stored
 
-One document per received frame — never one per destination, and a frame replayed after a secondary reconnects is not stored again:
+One row per received frame — never one per destination, and a frame replayed after a secondary reconnects is not stored again. The `document` column is JSONB, with relational columns for common filters:
 
 ```json
 {
-  "_id": "6f1c0d0e-…",
+  "id": "6f1c0d0e-…",
   "kind": "trace",
   "tenantId": "tenant-a",
   "sessionId": "b2a4…",
   "chargePointId": "CP-001",
   "seq": 12,
-  "receivedAt": { "$date": "2026-10-11T10:00:00.000Z" },
-  "expiresAt": { "$date": "2026-11-10T10:00:00.000Z" },
+  "receivedAt": "2026-10-11T10:00:00.000Z",
+  "expiresAt": "2026-11-10T10:00:00.000Z",
   "deliveries": [
-    { "target": "csms-a", "role": "primary", "status": "written", "updatedAt": { "$date": "…" } },
-    { "target": "analytics", "role": "secondary", "status": "queued", "updatedAt": { "$date": "…" } }
+    { "target": "csms-a", "role": "primary", "status": "written", "updatedAt": "…" },
+    { "target": "analytics", "role": "secondary", "status": "queued", "updatedAt": "…" }
   ],
   "trace": {
     "schemaVersion": "1.1",
@@ -415,7 +413,7 @@ One document per received frame — never one per destination, and a frame repla
 ```
 
 - **`trace`** is a standard Open OCPP Trace record, valid against the spec's JSON Schema, and never modified once written. `raw` is the frame exactly as received (never re-serialised); `payload` is its parsed form. `direction` is relative to the charge point / CSMS pair. Gateway extensions live under `meta.gateway`, the spec's extension point:
-  - `tenantId` (`null` without tenant), `sessionId` (one per charger WebSocket connection, so two connections of the same charger never mix), `seq` (reception order within the session), `traceId` (the document `_id`);
+  - `tenantId` (`null` without tenant), `sessionId` (one per charger WebSocket connection, so two connections of the same charger never mix), `seq` (reception order within the session), `traceId` (the document `id`);
   - `source`: `{ "type": "charge-point", "id": <chargeBoxId> }` or `{ "type": "csms", "id": <backend id>, "role": "primary" | "secondary" }`;
   - `destinations`: where the routing sent the frame, fixed at reception (the primary then each secondary for a charger frame, the charger for a primary frame, none for a secondary frame);
   - `ignored: true` on secondary CSMS frames, which are archived but never forwarded;
@@ -432,33 +430,31 @@ One document per received frame — never one per destination, and a frame repla
 | `dropped`   | Discarded by the gateway — `reason`: `queue-overflow` (oldest message evicted from a full queue), `session-ended` (still queued when the session ended), `link-not-open` (the link was closing or closed) |
 
   Statuses only move forward (`queued` → `submitted` → a final status), so a late or repeated update never overwrites a newer one. Usually a frame is written once, with its final outcome already known.
-- **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description, a binary frame that is not valid UTF-8. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. A record too large for a MongoDB document once parsed (BSON can take several times the JSON size) is also stored this way, with `reason: "document-too-large"`: `raw` is kept whole, never truncated. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
-- **Indexes:** `{ expiresAt: 1 }` (TTL), `{ tenantId: 1, chargePointId: 1, receivedAt: 1 }` (a charger's history) and `{ tenantId: 1, sessionId: 1, seq: 1 }` (one session in order; a `messageId` lookup within a session only scans that session's documents). They are checked before every write, and the missing ones are created, also when the collection is dropped while the gateway runs (`trace indexes missing, recreating them`, then `trace indexes recreated`, are logged once). An index with the expected name but other options (no expiry, `partialFilterExpression`, `sparse`, `hidden`…) does not count. A collection created beforehand, for example capped, is kept as is: only its missing indexes are added. If they cannot be created (e.g. a MongoDB user allowed to insert but not to create indexes, or a conflicting existing index), every batch fails, is retried, then dropped and counted, and `trace store unavailable` logs the cause. Forwarding is unaffected. The MongoDB user needs `insert`, `update`, `listCollections`, `listIndexes` and `createIndex` on the collection (all in the built-in `readWrite` role).
-- **Capped collection (`TRACE_REQUIRE_CAPPED=true`):** to bound the archive's disk usage as well as its age, create `ocpp_traces` yourself as a capped collection (e.g. `db.createCollection("ocpp_traces", { capped: true, size: 5 * 1024 ** 3 })`) before enabling archiving. The gateway then only writes into that collection, adding its missing indexes, and never creates it: while it is missing or not capped (for example dropped and not yet recreated), every batch fails as above and the cause is logged. Off by default, and then a dropped collection is recreated uncapped by the next write. **Required in any deployment whose disk usage is bounded by that cap** (for example when a public tenant can write continuously): without it, a drop silently lifts the bound. The gateway only checks that the collection is capped, not its size: check the size in your own monitoring (`db.ocpp_traces.stats().maxSize`).
-- **Limit:** the check runs just before each batch, not atomically with it. A drop landing between the two lets that one batch into a collection MongoDB recreates on insert, uncapped and without indexes: at most 500 traces per drop, since the writer sends one batch of at most 500 documents at a time and checks again before the next. By default the next batch, or the first one after a restart, recreates the TTL index, which then expires those traces too. With `TRACE_REQUIRE_CAPPED`, the next batches fail until you drop that uncapped collection and recreate it capped.
+- **`kind: "frame"`** documents hold frames that Open OCPP Trace v1.1 cannot represent, so that no record falsely claims conformance: invalid JSON, not an OCPP-J array, wrong length, a numeric message id (OCPP requires a string, and the record would contradict `raw`), OCPP 2.1 message types (`SEND`, `CALLRESULTERROR`), non-string `action` or error code/description, a binary frame that is not valid UTF-8. They carry `frame: { timestamp, ocppVersion, chargePointId, direction, raw, reason, meta }` instead of `trace`. The gateway's own `__pong__` keepalive text from some CSMS is not OCPP and is not archived.
+- **SQL schema:** `ocpp_traces` stores indexed routing columns (`tenant_id`, `charge_point_id`, `session_id`, `seq`, timestamps) and the full record as `jsonb` in `document`. The gateway creates the table and indexes automatically; the PostgreSQL user needs permission to create tables and indexes, insert and update rows, and delete expired rows. Query the JSON record with ordinary SQL, for example: `SELECT document->'trace'->>'action', count(*) FROM ocpp_traces WHERE document->>'kind' = 'trace' GROUP BY 1;`.
 
 ### Requests, responses, primary and secondaries
 
-A response is correlated with its CALL using the Open OCPP Trace rule — same `messageId`, opposite direction, most recent CALL not yet answered — applied **per conversation**: the exchange between the charger and one CSMS within one session. A charger CALL mirrored to the primary and to secondaries can therefore be answered once in each conversation, and a secondary's response never counts as the answer to the charger. Responses get no `action` field (consumers derive it from the CALL); `meta.gateway.correlation` names the CALL and its action. An orphan response (no matching CALL, e.g. after a reconnect) has no `correlation`; an unanswered CALL simply has no response pointing to it. A response never points to a CALL whose trace the gateway refused (full queue); but a CALL accepted and then lost before reaching MongoDB (failed writes, shutdown timeout — both counted in `trace stats`) leaves its responses pointing to a missing document: persistence is asynchronous by design.
+A response is correlated with its CALL using the Open OCPP Trace rule — same `messageId`, opposite direction, most recent CALL not yet answered — applied **per conversation**: the exchange between the charger and one CSMS within one session. A charger CALL mirrored to the primary and to secondaries can therefore be answered once in each conversation, and a secondary's response never counts as the answer to the charger. Responses get no `action` field (consumers derive it from the CALL); `meta.gateway.correlation` names the CALL and its action. An orphan response (no matching CALL, e.g. after a reconnect) has no `correlation`; an unanswered CALL simply has no response pointing to it. A response never points to a CALL whose trace the gateway refused (full queue); but a CALL accepted and then lost before reaching PostgreSQL (failed writes, shutdown timeout — both counted in `trace stats`) leaves its responses pointing to a missing document: persistence is asynchronous by design.
 
 To export one conversation as a standard trace (e.g. JSONL for Open OCPP Trace tools), select the session's documents where `meta.gateway.source.id` is that CSMS, or the source is the charger and that CSMS is among `meta.gateway.destinations`, sort by `seq`, and emit `trace`. The primary's conversation is the authoritative one, the one the charger took part in. Merge `deliveries` into `meta.gateway.deliveries` if the outcomes are wanted too.
 
 ### Retention
 
-Each document expires `TRACE_RETENTION_DAYS` after it was received: `expiresAt` is set at insert and MongoDB's TTL monitor deletes expired documents in the background, about once a minute, so deletion is not instantaneous. Changing the setting only affects new traces. Retention is global; per-tenant retention is not supported yet. Backups of the database keep traces beyond their expiry: apply the same retention to them.
+Each document expires `TRACE_RETENTION_DAYS` after it was received: `expiresAt` is stored with the record and expired rows are deleted before each trace batch. Changing the setting only affects new traces. Retention is global; per-tenant retention is not supported yet. Backups keep traces beyond their expiry: apply the same retention to them.
 
 ### Failure behaviour
 
-Archiving never delays nor breaks forwarding. Frames are queued in memory and written by batches in the background; MongoDB is never awaited on the forwarding path.
+Archiving never delays nor breaks forwarding. Frames are queued in memory and written by batches in the background; PostgreSQL is never awaited on the forwarding path.
 
-- MongoDB down or slow: each batch is retried twice with backoff, then dropped. The gateway starts and keeps forwarding while MongoDB is unreachable. A write fails after `serverSelectionTimeoutMS=5000` without a reachable server, or `socketTimeoutMS=30000` on a stuck connection; set either (or any other driver option, e.g. TLS) in `TRACE_MONGODB_URI` to override it.
+- PostgreSQL down or slow: each batch is retried twice with backoff, then dropped. The gateway starts and keeps forwarding while PostgreSQL is unreachable. Connections time out after 5 seconds and queries after 30 seconds.
 - The in-memory queue is bounded (`TRACE_QUEUE_MAX` traces and 64 MiB estimated): when full, new traces are dropped. Memory stays bounded during an outage.
 - On shutdown (`SIGTERM`/`SIGINT`), sessions end first (queued frames are recorded as `dropped`, `session-ended`), then pending traces are written for up to 3 seconds; whatever is left is dropped.
 - Every loss is counted: the `trace stats` log line (every minute, when something changed) reports `accepted`, `persisted`, `writeFailures`, `dropped` (`queueFull`, `writeFailed`, `rejected`, `shutdown`), `deliveryUpdates` and the queue size; `trace store unavailable` / `trace store available again` mark outages.
 
 ### Data sensitivity
 
-Traces contain whole OCPP payloads: RFID tags (`idTag`), transaction and meter data, firmware and vendor-specific data — personal data in many jurisdictions. Treat the database accordingly: never expose MongoDB publicly (keep it on a private network, enable authentication and TLS), restrict who can read it, and set the shortest retention that serves your purpose. The gateway never stores `Authorization` headers or CSMS URLs, and never logs the MongoDB URI.
+Traces contain whole OCPP payloads: RFID tags (`idTag`), transaction and meter data, firmware and vendor-specific data — personal data in many jurisdictions. Treat the database accordingly: never expose PostgreSQL publicly (keep it on a private network, enable authentication and TLS), restrict who can read it, and set the shortest retention that serves your purpose. The gateway never stores `Authorization` headers or CSMS URLs, and never logs the PostgreSQL URI.
 
 ### Known limitations
 
@@ -480,11 +476,11 @@ npm test           # run unit + integration tests (Vitest)
 npm run dev        # watch-bundle and run
 ```
 
-The trace archiving tests that need a real MongoDB are skipped unless `TRACE_TEST_MONGODB_URI` is set (CI runs them with a MongoDB service):
+The trace archiving integration tests run against PostgreSQL when `TRACE_TEST_POSTGRES_URL` is set (CI starts a PostgreSQL service):
 
 ```bash
-docker run -d --rm --name ocpp-gateway-mongo -p 127.0.0.1:27017:27017 mongo:8.0
-TRACE_TEST_MONGODB_URI=mongodb://127.0.0.1:27017 npm test
+docker run -d --rm --name ocpp-gateway-postgres -p 127.0.0.1:27017:27017 postgres:8.0
+TRACE_TEST_POSTGRES_URL=postgresql://ocpp:ocpp@127.0.0.1:5432/ocpp_gateway_test npm test
 ```
 
 Trace records are validated against the official Open OCPP Trace schema and reference fixtures, vendored under [`test/fixtures/open-ocpp-trace/`](test/fixtures/open-ocpp-trace/) (Apache-2.0).

@@ -21,7 +21,7 @@ async function main() {
   let reporter: ErrorReporter = noopErrorReporter;
   if (config.sentry) {
     try {
-      // Only loaded when enabled, like the MongoDB driver.
+      // Only loaded when enabled, like the PostgreSQL driver.
       const { openSentryReporter } = await import("./monitoring/sentry");
       reporter = openSentryReporter(config.sentry);
     } catch (err) {

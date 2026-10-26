@@ -22,27 +22,19 @@ import {
 export const DEFAULT_MAX_MESSAGE_BYTES = 1024 * 1024;
 /** `ws` truncates `maxPayload` to a signed 32-bit integer; above this it wraps and the limit is lost. */
 const MAX_MESSAGE_BYTES_UPPER_BOUND = 2 ** 31 - 1;
-/**
- * Largest message that still fits a MongoDB document (16 MiB) as a raw frame,
- * with room for the envelope: trace archiving never truncates a frame.
- */
+/** Keeps the serialized JSONB record well below PostgreSQL's 1 GiB field limit. */
 const TRACE_MAX_MESSAGE_BYTES = 15 * 1024 * 1024;
-
-const DEFAULT_TRACE_DATABASE = "ocpp_gateway";
 const DEFAULT_TRACE_RETENTION_DAYS = 30;
 const DEFAULT_TRACE_QUEUE_MAX = 10_000;
 
-/** MongoDB trace archiving settings; see README "Trace archiving". */
+/** PostgreSQL trace archiving settings; see README "Trace archiving". */
 export interface TraceConfig {
   /** May carry credentials: never log it. */
-  mongodbUri: string;
-  database: string;
-  /** Each trace expires this many days after it was received (MongoDB TTL). */
+  postgresUrl: string;
+  /** Each trace expires this many days after it was received. */
   retentionDays: number;
-  /** Trace documents buffered in memory while waiting for MongoDB; more are dropped. */
+  /** Trace documents buffered in memory while waiting for PostgreSQL; more are dropped. */
   queueMax: number;
-  /** Only write into an existing capped collection; never create it. */
-  requireCapped: boolean;
 }
 
 /** Sentry error reporting settings; see README "Error reporting". */
@@ -83,7 +75,7 @@ export interface Config {
    * the socket's remote address is used.
    */
   clientIpHeader?: string;
-  /** Trace archiving to MongoDB. Unset: disabled. */
+  /** Trace archiving to PostgreSQL. Unset: disabled. */
   trace?: TraceConfig;
   /** Error reporting to Sentry. Unset: disabled. */
   sentry?: SentryConfig;
@@ -105,39 +97,32 @@ function parseOptionalListenHost(value: string | undefined): string | undefined 
   return host;
 }
 
-function parseMongodbUri(value: string | undefined): string {
+function parsePostgresUrl(value: string | undefined): string {
   const uri = value?.trim() ?? "";
-  // The URI may carry credentials: errors never echo it.
   if (uri === "") throw new Error("required when TRACE_ENABLED is true");
-  if (!/^mongodb(\+srv)?:\/\//.test(uri)) {
-    throw new Error("must start with mongodb:// or mongodb+srv://");
+  let parsed: URL;
+  try {
+    parsed = new URL(uri);
+  } catch {
+    throw new Error("must be a valid postgres:// or postgresql:// URL");
+  }
+  if (!["postgres:", "postgresql:"].includes(parsed.protocol) || !parsed.hostname) {
+    throw new Error("must start with postgres:// or postgresql://");
   }
   return uri;
-}
-
-/** MongoDB database names: none of `/`, `\`, `.`, space, `"`, `$`, `*`, `<`, `>`, `:`, `|`, `?`, NUL; under 64 bytes. */
-function parseDatabaseName(value: string | undefined): string {
-  if (value === undefined || value.trim() === "") return DEFAULT_TRACE_DATABASE;
-  const name = value.trim();
-  if (/[/\\. "$*<>:|?]/.test(name) || name.includes("\0") || Buffer.byteLength(name) > 63) {
-    throw new Error(`Invalid database name: "${value}"`);
-  }
-  return name;
 }
 
 function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
   if (!parseEnv("TRACE_ENABLED", (value) => parseBoolean(value, false))) return undefined;
 
   const config: TraceConfig = {
-    mongodbUri: parseEnv("TRACE_MONGODB_URI", parseMongodbUri),
-    database: parseEnv("TRACE_MONGODB_DATABASE", parseDatabaseName),
+    postgresUrl: parseEnv("TRACE_POSTGRES_URL", parsePostgresUrl),
     retentionDays: parseEnv("TRACE_RETENTION_DAYS", (value) =>
       parseOptionalIntegerInRange(value, DEFAULT_TRACE_RETENTION_DAYS, 1, 36_500),
     ),
     queueMax: parseEnv("TRACE_QUEUE_MAX", (value) =>
       parseOptionalIntegerInRange(value, DEFAULT_TRACE_QUEUE_MAX, 1, 1_000_000),
     ),
-    requireCapped: parseEnv("TRACE_REQUIRE_CAPPED", (value) => parseBoolean(value, false)),
   };
   if (maxMessageBytes > TRACE_MAX_MESSAGE_BYTES) {
     throw new Error(
@@ -150,7 +135,7 @@ function loadTraceConfig(maxMessageBytes: number): TraceConfig | undefined {
 function parseOptionalSentryDsn(value: string | undefined): string | undefined {
   const dsn = parseOptionalString(value);
   if (dsn === undefined) return undefined;
-  // Errors never echo the DSN, like TRACE_MONGODB_URI. The checks are the
+  // Errors never echo the DSN, like TRACE_POSTGRES_URL. The checks are the
   // SDK's own: it would silently drop a DSN failing them.
   const url = URL.parse(dsn);
   if (

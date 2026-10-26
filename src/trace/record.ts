@@ -79,10 +79,10 @@ export interface UnparsedFrame {
   raw: string;
   /**
    * Besides the parser's reasons: `lossy-binary` for a binary frame that was
-   * not valid UTF-8; set by the store for records it cannot hold (too large,
-   * or not BSON-encodable).
+   * not valid UTF-8; `not-storable` is reserved for a record that cannot be
+   * serialized by the archive store.
    */
-  reason: UnparsedReason | "lossy-binary" | "document-too-large" | "not-storable";
+  reason: UnparsedReason | "lossy-binary" | "not-storable";
   meta: { gateway: GatewayMeta };
 }
 
